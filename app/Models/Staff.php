@@ -5,30 +5,23 @@ namespace App\Models;
 use Illuminate\Database\Eloquent\Factories\HasFactory;
 use Illuminate\Database\Eloquent\Model;
 
-class Property extends Model
+class Staff extends Model
 {
     use HasFactory;
 
+    protected $table = 'staff';
+
     protected $fillable = [
         'name',
-        'description',
-        'address',
-        'city',
-        'area',
-        'price_per_night',
-        'latitude',
-        'longitude',
+        'role',
+        'phone',
+        'status',
+        'room',
         'host_id',
-        'image_url',
     ];
 
     public function host()
     {
         return $this->belongsTo(User::class, 'host_id');
-    }
-
-    public function rooms()
-    {
-        return $this->hasMany(Room::class);
     }
 }

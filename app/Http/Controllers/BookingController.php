@@ -4,6 +4,7 @@ namespace App\Http\Controllers;
 
 use App\Models\Booking;
 use App\Models\Room;
+use App\Models\RoomLock;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Redis;
 use Illuminate\Support\Facades\DB;
@@ -79,6 +80,9 @@ class BookingController extends Controller
                 'payment_status' => 'pending',
             ]);
 
+            // Clear temporary locks held by this user for this room
+            RoomLock::where('room_id', $roomId)->where('guest_id', $guestId)->delete();
+
             return response()->json([
                 'message' => 'Booking initialized successfully.',
                 'booking' => $booking
@@ -102,5 +106,92 @@ class BookingController extends Controller
         }
 
         return response()->json($bookings);
+    }
+
+    public function lockRoom(Request $request)
+    {
+        $request->validate([
+            'room_id' => 'required|exists:rooms,id',
+            'check_in' => 'required|date|after_or_equal:today',
+            'check_out' => 'required|date|after:check_in',
+        ]);
+
+        $roomId = $request->room_id;
+        $guestId = $request->user()->id;
+        $checkIn = $request->check_in;
+        $checkOut = $request->check_out;
+
+        return DB::transaction(function () use ($roomId, $guestId, $checkIn, $checkOut) {
+            // 1. Check for overlapping permanent bookings
+            $overlapBooking = Booking::where('room_id', $roomId)
+                ->where(function ($query) use ($checkIn, $checkOut) {
+                    $query->whereBetween('check_in', [$checkIn, $checkOut])
+                        ->orWhereBetween('check_out', [$checkIn, $checkOut])
+                        ->orWhere(function ($q) use ($checkIn, $checkOut) {
+                            $q->where('check_in', '<=', $checkIn)
+                              ->where('check_out', '>=', $checkOut);
+                        });
+                })->exists();
+
+            if ($overlapBooking) {
+                return response()->json([
+                    'message' => 'This room is already reserved for the selected dates.'
+                ], 409);
+            }
+
+            // 2. Check for overlapping temporary locks by other users
+            $overlapLock = RoomLock::where('room_id', $roomId)
+                ->where('guest_id', '!=', $guestId)
+                ->where('expires_at', '>', now())
+                ->where(function ($query) use ($checkIn, $checkOut) {
+                    $query->whereBetween('check_in', [$checkIn, $checkOut])
+                        ->orWhereBetween('check_out', [$checkIn, $checkOut])
+                        ->orWhere(function ($q) use ($checkIn, $checkOut) {
+                            $q->where('check_in', '<=', $checkIn)
+                              ->where('check_out', '>=', $checkOut);
+                        });
+                })->exists();
+
+            if ($overlapLock) {
+                return response()->json([
+                    'message' => 'Room is temporarily held by another customer. Please wait or select a different room.'
+                ], 409);
+            }
+
+            // 3. Clear any expired/stray locks for this room
+            RoomLock::where('room_id', $roomId)
+                ->where('expires_at', '<=', now())
+                ->delete();
+
+            // 4. Create or update user's hold lock (10 minutes duration)
+            $lock = RoomLock::updateOrCreate(
+                ['room_id' => $roomId, 'guest_id' => $guestId, 'check_in' => $checkIn, 'check_out' => $checkOut],
+                ['expires_at' => now()->addMinutes(10)]
+            );
+
+            return response()->json([
+                'message' => 'Room temporarily locked for 10 minutes.',
+                'lock' => $lock
+            ]);
+        });
+    }
+
+    public function unlockRoom(Request $request)
+    {
+        $request->validate([
+            'room_id' => 'required|exists:rooms,id',
+        ]);
+
+        $roomId = $request->room_id;
+        $guestId = $request->user()->id;
+
+        // Delete active locks held by this user for the room
+        RoomLock::where('room_id', $roomId)
+            ->where('guest_id', $guestId)
+            ->delete();
+
+        return response()->json([
+            'message' => 'Room lock released successfully.'
+        ]);
     }
 }
