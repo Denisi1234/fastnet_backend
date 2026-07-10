@@ -9,15 +9,29 @@ use App\Http\Controllers\TicketController;
 use App\Http\Controllers\AdminController;
 use App\Http\Controllers\StaffController;
 use App\Http\Controllers\LodgeServiceRequestController;
+use App\Http\Controllers\PasswordResetController;
+use App\Http\Controllers\ReviewController;
+use App\Http\Controllers\WishlistController;
 use Illuminate\Support\Facades\Route;
 
 // Public Auth routes
-Route::post('/register', [AuthController::class, 'register']);
-Route::post('/login', [AuthController::class, 'login']);
+Route::middleware('throttle:10,1')->group(function () {
+    Route::post('/register', [AuthController::class, 'register']);
+    Route::post('/login', [AuthController::class, 'login']);
+});
+
+// Password Reset (public)
+Route::middleware('throttle:5,1')->group(function () {
+    Route::post('/forgot-password', [PasswordResetController::class, 'sendResetLink']);
+    Route::post('/reset-password', [PasswordResetController::class, 'resetPassword']);
+});
 
 // Public Property / Lodge discovery routes
 Route::get('/properties', [PropertyController::class, 'index']);
 Route::get('/properties/{id}', [PropertyController::class, 'show']);
+
+// Property reviews (GET is public)
+Route::get('/properties/{id}/reviews', [ReviewController::class, 'index']);
 
 // Protected routes (require Sanctum API token authentication)
 Route::middleware('auth:sanctum')->group(function () {
@@ -68,6 +82,24 @@ Route::middleware('auth:sanctum')->group(function () {
     // Real-time temporary inventory lock/unlock routes
     Route::post('/bookings/lock', [BookingController::class, 'lockRoom']);
     Route::post('/bookings/unlock', [BookingController::class, 'unlockRoom']);
+
+    // Cancel booking
+    Route::delete('/bookings/{id}', [BookingController::class, 'cancel']);
+
+    // Reviews
+    Route::post('/reviews', [ReviewController::class, 'store']);
+
+    // Wishlist
+    Route::get('/wishlist', [WishlistController::class, 'index']);
+    Route::post('/wishlist', [WishlistController::class, 'store']);
+    Route::delete('/wishlist/{property_id}', [WishlistController::class, 'destroy']);
+
+    // Admin bookings
+    Route::get('/admin/bookings', [AdminController::class, 'bookings']);
+    Route::patch('/admin/bookings/{id}/status', [AdminController::class, 'updateBookingStatus']);
+
+    // Admin payments
+    Route::get('/admin/payments', [AdminController::class, 'payments']);
 });
 
 // Payment webhook (Public)

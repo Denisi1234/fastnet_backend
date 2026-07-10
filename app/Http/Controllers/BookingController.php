@@ -6,6 +6,7 @@ use App\Models\Booking;
 use App\Models\Room;
 use App\Models\RoomLock;
 use Illuminate\Http\Request;
+use Illuminate\Support\Facades\Auth;
 use Illuminate\Support\Facades\Redis;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Log;
@@ -193,5 +194,32 @@ class BookingController extends Controller
         return response()->json([
             'message' => 'Room lock released successfully.'
         ]);
+    }
+
+    public function cancel($id)
+    {
+        $user = Auth::user();
+
+        // Allow the booking owner or an admin to cancel
+        $query = Booking::where('id', $id);
+        if ($user->role !== 'admin') {
+            $query->where('guest_id', $user->id);
+        }
+
+        $booking = $query->first();
+
+        if (!$booking) {
+            return response()->json(['message' => 'Booking not found.'], 404);
+        }
+
+        if (in_array($booking->status, ['Cancelled', 'Completed'])) {
+            return response()->json([
+                'message' => 'Booking cannot be cancelled as it is already ' . $booking->status . '.'
+            ], 422);
+        }
+
+        $booking->update(['status' => 'Cancelled']);
+
+        return response()->json($booking);
     }
 }
