@@ -11,6 +11,7 @@ use Illuminate\Support\Facades\Hash;
 
 class AdminController extends Controller
 {
+
     /**
      * Get all users.
      */

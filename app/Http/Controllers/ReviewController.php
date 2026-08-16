@@ -53,4 +53,26 @@ class ReviewController extends Controller
             return response()->json(['message' => 'Could not save review: ' . $e->getMessage()], 500);
         }
     }
+
+    public function adminIndex(Request $request)
+    {
+        try {
+            $reviews = Review::with(['user:id,name', 'property:id,name'])
+                ->orderBy('created_at', 'desc')
+                ->get()
+                ->map(function ($r) {
+                    return [
+                        'id' => $r->id,
+                        'user_name' => $r->user->name ?? 'Guest',
+                        'property_name' => $r->property->name ?? 'Unknown Property',
+                        'rating' => $r->rating,
+                        'comment' => $r->comment,
+                        'created_at' => $r->created_at,
+                    ];
+                });
+            return response()->json($reviews);
+        } catch (\Exception $e) {
+            return response()->json([]);
+        }
+    }
 }

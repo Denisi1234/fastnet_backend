@@ -12,30 +12,67 @@ use App\Http\Controllers\LodgeServiceRequestController;
 use App\Http\Controllers\PasswordResetController;
 use App\Http\Controllers\ReviewController;
 use App\Http\Controllers\WishlistController;
+use App\Http\Controllers\NewsletterSubscriptionController;
 use Illuminate\Support\Facades\Route;
 
 // Public Auth routes
-Route::middleware('throttle:10,1')->group(function () {
+Route::middleware('throttle:60,1')->group(function () {
     Route::post('/register', [AuthController::class, 'register']);
     Route::post('/login', [AuthController::class, 'login']);
+    Route::post('/easy-auth', [AuthController::class, 'easyAuth']);
 });
 
-// Password Reset (public)
-Route::middleware('throttle:5,1')->group(function () {
+// Password Reset & OTP Verification (public)
+Route::middleware('throttle:60,1')->group(function () {
     Route::post('/forgot-password', [PasswordResetController::class, 'sendResetLink']);
+    Route::post('/send-otp', [PasswordResetController::class, 'sendResetLink']);
+    Route::post('/resend-code', [PasswordResetController::class, 'sendResetLink']);
+    Route::post('/verify-otp', [PasswordResetController::class, 'verifyOtp']);
     Route::post('/reset-password', [PasswordResetController::class, 'resetPassword']);
 });
 
-// Public Property / Lodge discovery routes
+// Public Property / Lodge discovery & Receipt / Notification routes
 Route::get('/properties', [PropertyController::class, 'index']);
 Route::get('/properties/{id}', [PropertyController::class, 'show']);
+Route::post('/receipts/generate', [BookingController::class, 'generateReceipt']);
+Route::get('/notifications/preferences', [\App\Http\Controllers\NotificationPreferenceController::class, 'getPreferences']);
+Route::post('/notifications/preferences', [\App\Http\Controllers\NotificationPreferenceController::class, 'updatePreferences']);
+Route::get('/travel/preferences', [\App\Http\Controllers\TravelPreferenceController::class, 'getPreferences']);
+Route::post('/travel/preferences', [\App\Http\Controllers\TravelPreferenceController::class, 'updatePreferences']);
+Route::get('/support/help-centre', [\App\Http\Controllers\SupportController::class, 'getHelpCentreData']);
+Route::get('/user/personal-details', [\App\Http\Controllers\PersonalDetailsController::class, 'getDetails']);
+Route::post('/user/personal-details', [\App\Http\Controllers\PersonalDetailsController::class, 'updateDetails']);
+Route::get('/map-config', function () {
+    return response()->json([
+        'mapbox_token' => env('MAPBOX_API_KEY', 'YOUR_MAPBOX_ACCESS_TOKEN'),
+        'style' => 'mapbox://styles/mapbox/streets-v12'
+    ]);
+});
 
 // Property reviews (GET is public)
 Route::get('/properties/{id}/reviews', [ReviewController::class, 'index']);
 
+// Newsletter subscription (Public)
+Route::post('/subscribe', [NewsletterSubscriptionController::class, 'subscribe']);
+
+// Booking calculation, revalidation & creation (Public)
+Route::post('/bookings/calculate', [BookingController::class, 'calculate']);
+Route::get('/bookings/calculate', [BookingController::class, 'calculate']);
+Route::get('/bookings/revalidate', [BookingController::class, 'revalidate']);
+Route::post('/bookings/revalidate', [BookingController::class, 'revalidate']);
+Route::post('/bookings/create', [BookingController::class, 'store']);
+
+// AzamPay Payment gateway routes (Public)
+Route::post('/payments/checkout', [PaymentController::class, 'checkout']);
+Route::post('/payments/webhook', [PaymentController::class, 'webhook']);
+Route::post('/payments/azampay/callback', [PaymentController::class, 'webhook']);
+Route::get('/payments/status/{codeOrId}', [PaymentController::class, 'status']);
+
 // Protected routes (require Sanctum API token authentication)
 Route::middleware('auth:sanctum')->group(function () {
     Route::get('/me', [AuthController::class, 'me']);
+    Route::patch('/profile', [AuthController::class, 'updateProfile']);
+    Route::post('/profile/photo', [AuthController::class, 'uploadProfilePhoto']);
     Route::post('/logout', [AuthController::class, 'logout']);
     
     // Booking routes
@@ -45,6 +82,10 @@ Route::middleware('auth:sanctum')->group(function () {
     // Property listing (Hosts/Owners only)
     Route::post('/properties', [PropertyController::class, 'store']);
     Route::post('/upload', [PropertyController::class, 'upload']);
+    Route::post('/properties/{propertyId}/rooms', [PropertyController::class, 'storeRoom']);
+    Route::get('/properties/{propertyId}/rooms', [PropertyController::class, 'getRooms']);
+    Route::put('/rooms/{id}', [PropertyController::class, 'updateRoom']);
+    Route::delete('/rooms/{id}', [PropertyController::class, 'destroyRoom']);
     
     // Payment checkout initiation
     Route::post('/payments/checkout', [PaymentController::class, 'checkout']);
@@ -66,6 +107,15 @@ Route::middleware('auth:sanctum')->group(function () {
     Route::post('/admin/users', [AdminController::class, 'addUser']);
     Route::get('/admin/properties', [AdminController::class, 'properties']);
     Route::patch('/admin/properties/{id}/status', [AdminController::class, 'updatePropertyStatus']);
+    Route::get('/admin/reviews', [ReviewController::class, 'adminIndex']);
+
+    // Verification Workflow Routes
+    Route::post('/verification/owner', [\App\Http\Controllers\VerificationController::class, 'submitOwnerVerification']);
+    Route::get('/verification/owner/{userId?}', [\App\Http\Controllers\VerificationController::class, 'getOwnerVerification']);
+    Route::post('/admin/verification/owner/{ownerId}', [\App\Http\Controllers\VerificationController::class, 'reviewOwner']);
+    Route::post('/verification/lodge/{propertyId}', [\App\Http\Controllers\VerificationController::class, 'submitLodgeVerification']);
+    Route::post('/admin/verification/lodge/{propertyId}', [\App\Http\Controllers\VerificationController::class, 'reviewLodge']);
+    Route::get('/admin/verification/summary', [\App\Http\Controllers\VerificationController::class, 'adminVerificationSummary']);
 
     // Staff routes
     Route::get('/staff', [StaffController::class, 'index']);

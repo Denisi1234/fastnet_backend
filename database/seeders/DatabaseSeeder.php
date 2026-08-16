@@ -12,6 +12,15 @@ class DatabaseSeeder extends Seeder
 {
     public function run(): void
     {
+        // 0. Create a super admin user
+        User::create([
+            'name' => 'Super Admin',
+            'email' => 'admin@admin.com',
+            'password' => Hash::make('12345678'),
+            'role' => 'admin',
+            'phone_number' => '+255 700 000 000',
+        ]);
+
         // 1. Create a host user
         $host = User::create([
             'name' => 'John Doe',
@@ -33,7 +42,7 @@ class DatabaseSeeder extends Seeder
         // 2. Define standard properties matching the mobile app mock list
         $propertiesData = [
             [
-                'name' => 'Palm Garden Lodge',
+                'name' => 'Sunrise Lodge',
                 'city' => 'Dar es Salaam',
                 'area' => 'Mikocheni',
                 'price_per_night' => 85000,
