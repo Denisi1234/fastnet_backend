@@ -5,6 +5,7 @@ namespace App\Services;
 use App\Models\Property;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Cache;
+use Illuminate\Support\Facades\Log;
 
 class PropertySearchService
 {
@@ -17,7 +18,12 @@ class PropertySearchService
 
     public function search(Request $request)
     {
-        $search   = $request->input('q') ?? $request->input('search') ?? $request->input('name') ?? $request->input('location');
+        $t0 = microtime(true);
+
+        $search           = $request->input('q') ?? $request->input('search') ?? $request->input('destination') ?? $request->input('dest') ?? $request->input('name') ?? $request->input('location');
+        if (!is_null($search)) {
+            $search = preg_replace('/\s+/', ' ', trim($search));
+        }
         $city             = $request->input('city');
         $area             = $request->input('area');
         $checkIn          = $request->input('check_in') ?? $request->input('checkIn');
@@ -30,15 +36,16 @@ class PropertySearchService
         $lat              = $request->input('lat') ?? $request->input('latitude');
         $lng              = $request->input('lng') ?? $request->input('longitude');
         $radiusKm         = $request->input('radius_km', 25);
-        $priceMin         = $request->input('price_min');
-        $priceMax         = $request->input('price_max');
+        $priceMin         = $request->input('price_min') ?? $request->input('min_price');
+        $priceMax         = $request->input('price_max') ?? $request->input('max_price');
         $minRating        = $request->input('min_rating');
         $freeCancellation = $request->input('free_cancellation');
         $sortBy           = $request->input('sort') ?? $request->input('sort_by');
 
+        // Validate date range
         $isValidDateRange = false;
         if (!empty($checkIn) && !empty($checkOut)) {
-            $cIn = strtotime($checkIn);
+            $cIn  = strtotime($checkIn);
             $cOut = strtotime($checkOut);
             if ($cIn && $cOut && $cOut > $cIn) {
                 $isValidDateRange = true;
@@ -47,48 +54,67 @@ class PropertySearchService
 
         $propertyType = $request->input('property_type') ?? $request->input('type');
 
-        $isCacheable = empty($priceMin) && empty($priceMax) && empty($minRating) && empty($freeCancellation) && empty($propertyType) && empty($sortBy) && !$isValidDateRange && empty($lat) && $totalGuests <= 2 && $requiredRooms <= 1;
+        // Cache is applicable only for simple, no-date searches with default params
+        $isCacheable = empty($priceMin) && empty($priceMax) && empty($minRating) && empty($freeCancellation)
+            && empty($propertyType) && empty($sortBy) && !$isValidDateRange
+            && empty($lat) && $totalGuests <= 2 && $requiredRooms <= 1;
 
         if ($isCacheable) {
             $cacheKey = $this->buildCacheKey($search, $city);
-            $cached = Cache::get($cacheKey);
-            if ($cached !== null) {
+            $cached   = Cache::get($cacheKey);
+            if (is_array($cached)) {
+                Log::info('PropertySearch: cache HIT', ['key' => $cacheKey]);
                 return [
-                    'data' => $cached,
-                    'cache_status' => 'HIT'
+                    'paginator'    => null,
+                    'data'         => $cached,
+                    'cache_status' => 'HIT',
                 ];
+            }
+            // Discard legacy cached paginator objects; only API payload arrays are cache-safe.
+            if ($cached !== null) {
+                Cache::forget($cacheKey);
             }
         }
 
+        // ─── Build the base query ────────────────────────────────────────────────────
+        //
+        // Select only the fields needed for search result cards.
+        // Full details (description, host, all room fields) are loaded by show() separately.
         $query = Property::select([
-            'id', 'name', 'city', 'area', 'address', 'price_per_night', 
-            'latitude', 'longitude', 'image_url', 'created_at', 'status'
+            'id', 'name', 'city', 'area', 'address', 'price_per_night',
+            'latitude', 'longitude', 'image_url', 'created_at', 'status',
         ])
         ->with([
-            'rooms' => function($q) {
-                $q->select('id', 'property_id', 'room_number', 'capacity', 'max_adults', 'max_children', 'price', 'status', 'bed_configuration', 'total_inventory');
-            }
+            'rooms' => function ($q) {
+                // Load fields needed for availability, capacity checks, and room photos.
+                $q->select('id', 'property_id', 'room_number', 'capacity', 'max_adults', 'max_children', 'price', 'status', 'bed_configuration', 'total_inventory', 'photos');
+            },
         ])
         ->withAvg('reviews', 'rating')
         ->withCount('reviews');
 
+        // Always filter to active properties with at least one room
+        $query->where(function ($q) {
+            $q->whereNull('status')->orWhereRaw('LOWER(status) = ?', ['active']);
+        });
         $query->whereHas('rooms');
 
+        // ─── Location / text search ──────────────────────────────────────────────────
         if (!empty($search)) {
             $terms = array_filter(preg_split('/[,\s]+/', trim($search)));
             $query->where(function ($q) use ($terms, $search) {
-                $q->where('name', 'ilike', '%' . $search . '%')
-                  ->orWhere('city', 'ilike', '%' . $search . '%')
-                  ->orWhere('area', 'ilike', '%' . $search . '%')
-                  ->orWhere('address', 'ilike', '%' . $search . '%')
-                  ->orWhere('description', 'ilike', '%' . $search . '%');
+                // Search city, area, name, address — NOT description (avoids full table scan)
+                $q->where('name',    'ilike', '%' . $search . '%')
+                  ->orWhere('city',    'ilike', '%' . $search . '%')
+                  ->orWhere('area',    'ilike', '%' . $search . '%')
+                  ->orWhere('address', 'ilike', '%' . $search . '%');
 
                 foreach ($terms as $term) {
                     $term = trim($term);
                     if (strlen($term) > 2 && strtolower($term) !== 'tanzania') {
-                        $q->orWhere('city', 'ilike', '%' . $term . '%')
-                          ->orWhere('area', 'ilike', '%' . $term . '%')
-                          ->orWhere('name', 'ilike', '%' . $term . '%')
+                        $q->orWhere('city',    'ilike', '%' . $term . '%')
+                          ->orWhere('area',    'ilike', '%' . $term . '%')
+                          ->orWhere('name',    'ilike', '%' . $term . '%')
                           ->orWhere('address', 'ilike', '%' . $term . '%');
                     }
                 }
@@ -100,46 +126,50 @@ class PropertySearchService
         }
 
         if (!empty($area)) {
-            $query->where('area', 'like', '%' . $area . '%');
+            $query->where('area', 'ilike', '%' . $area . '%');
         }
 
+        // ─── Geo-radius filter ───────────────────────────────────────────────────────
         if (!empty($lat) && !empty($lng)) {
             $query->whereNotNull('latitude')
                   ->whereNotNull('longitude')
                   ->whereRaw("
                       (6371 * acos(
-                          cos(radians(?)) * cos(radians(latitude)) * cos(radians(longitude) - radians(?)) + 
+                          cos(radians(?)) * cos(radians(latitude)) * cos(radians(longitude) - radians(?)) +
                           sin(radians(?)) * sin(radians(latitude))
                       )) <= ?
                   ", [$lat, $lng, $lat, $radiusKm]);
         }
 
+        // ─── Price filters ───────────────────────────────────────────────────────────
         if (!empty($priceMin)) {
             $query->where('price_per_night', '>=', $priceMin);
         }
-
         if (!empty($priceMax)) {
             $query->where('price_per_night', '<=', $priceMax);
         }
 
+        // ─── Free cancellation filter ────────────────────────────────────────────────
         if (!empty($freeCancellation) && ($freeCancellation === '1' || $freeCancellation === 'true')) {
-            $query->where(function($q) {
+            $query->where(function ($q) {
                 $q->where('description', 'like', '%free cancellation%')
                   ->orWhere('description', 'like', '%flexible cancellation%')
-                  ->orWhereHas('rooms', function($rq) {
+                  ->orWhereHas('rooms', function ($rq) {
                       $rq->where('description', 'like', '%free cancellation%')
-                         ->orWhere('amenities', 'like', '%free cancellation%');
+                         ->orWhere('amenities',  'like', '%free cancellation%');
                   });
             });
         }
 
+        // ─── Property type / amenity filters ────────────────────────────────────────
         $amenities = $request->input('amenities');
+
         if (!empty($propertyType)) {
             $types = is_array($propertyType) ? $propertyType : explode(',', $propertyType);
-            $query->where(function($q) use ($types) {
+            $query->where(function ($q) use ($types) {
                 foreach ($types as $type) {
                     $trimmed = trim($type);
-                    $q->orWhere('name', 'like', '%' . $trimmed . '%')
+                    $q->orWhere('name',        'like', '%' . $trimmed . '%')
                       ->orWhere('description', 'like', '%' . $trimmed . '%');
                 }
             });
@@ -147,25 +177,44 @@ class PropertySearchService
 
         if (!empty($amenities)) {
             $amenityList = is_array($amenities) ? $amenities : explode(',', $amenities);
-            $query->where(function($groupQuery) use ($amenityList) {
-                foreach ($amenityList as $amenity) {
-                    $trimmedAmenity = trim($amenity);
-                    if (empty($trimmedAmenity)) continue;
-
-                    $groupQuery->orWhere('description', 'like', '%' . $trimmedAmenity . '%')
-                               ->orWhereHas('rooms', function($rq) use ($trimmedAmenity) {
-                                   $rq->where('amenities', 'like', '%' . $trimmedAmenity . '%')
+            foreach ($amenityList as $amenity) {
+                $trimmedAmenity = trim($amenity);
+                if (empty($trimmedAmenity)) continue;
+                $query->where(function ($groupQuery) use ($trimmedAmenity) {
+                    $groupQuery->where('description', 'like', '%' . $trimmedAmenity . '%')
+                               ->orWhereHas('rooms', function ($rq) use ($trimmedAmenity) {
+                                   $rq->where('amenities',   'like', '%' . $trimmedAmenity . '%')
                                       ->orWhere('description', 'like', '%' . $trimmedAmenity . '%');
                                });
-                }
-            });
+                });
+            }
         }
 
+        // ─── Rating filter ───────────────────────────────────────────────────────────
         if (!empty($minRating)) {
-            $query->whereHas('reviews', function($rq) use ($minRating) {
+            $query->whereHas('reviews', function ($rq) use ($minRating) {
                 $rq->selectRaw('AVG(rating) as avg_rating')
                    ->havingRaw('AVG(rating) >= ?', [$minRating]);
             })->orWhereDoesntHave('reviews');
+        }
+
+        // ─── Sorting ─────────────────────────────────────────────────────────────────
+        if (!empty($search) && empty($sortBy)) {
+            $query->orderByRaw("
+                CASE 
+                    WHEN name ILIKE ? THEN 1
+                    WHEN name ILIKE ? THEN 2
+                    WHEN name ILIKE ? THEN 3
+                    WHEN city ILIKE ? OR area ILIKE ? THEN 4
+                    ELSE 5
+                END ASC
+            ", [
+                $search,
+                $search . '%',
+                '%' . $search . '%',
+                $search,
+                $search
+            ]);
         }
 
         if ($sortBy === 'price_asc' || $sortBy === 'price-low') {
@@ -181,7 +230,7 @@ class PropertySearchService
         } elseif ($sortBy === 'distance' && !empty($lat) && !empty($lng)) {
             $query->orderByRaw("
                 (6371 * acos(
-                    cos(radians(?)) * cos(radians(latitude)) * cos(radians(longitude) - radians(?)) + 
+                    cos(radians(?)) * cos(radians(latitude)) * cos(radians(longitude) - radians(?)) +
                     sin(radians(?)) * sin(radians(latitude))
                 )) ASC
             ", [$lat, $lng, $lat]);
@@ -189,93 +238,146 @@ class PropertySearchService
             $query->orderBy('reviews_avg_rating', 'desc')->orderBy('id', 'asc');
         }
 
+        // ─── Pagination — ALWAYS paginate; never load all records into memory ────────
         $perPage = (int)($request->input('per_page') ?? $request->input('limit') ?? 20);
         $perPage = min(max(1, $perPage), 100);
+        $page    = (int)($request->input('page') ?? 1);
 
-        if ($request->has('page') || $request->has('per_page')) {
-            $paginator = $query->paginate($perPage);
-            return [
-                'paginator' => $paginator,
-                'cache_status' => 'MISS'
-            ];
-        }
+        Log::info('PropertySearch: executing paginated query', [
+            'search'   => $search,
+            'city'     => $city,
+            'page'     => $page,
+            'per_page' => $perPage,
+            'dates'    => $isValidDateRange ? "{$checkIn}→{$checkOut}" : 'none',
+            'build_ms' => round((microtime(true) - $t0) * 1000),
+        ]);
 
-        $properties = $query->get();
+        $t1        = microtime(true);
+        $paginator = $query->paginate($perPage, ['*'], 'page', $page);
 
-        $properties = $properties->filter(function ($property) use ($checkIn, $checkOut, $isValidDateRange, $requiredRooms, $totalGuests, $adults, $children) {
-            $hasQualifiedRoom = false;
-            $propertyAvailableInventorySum = 0;
-            $propertySatisfyingCapacitySum = 0;
+        Log::info('PropertySearch: DB paginate done', [
+            'total'  => $paginator->total(),
+            'db_ms'  => round((microtime(true) - $t1) * 1000),
+        ]);
 
-            foreach ($property->rooms as $room) {
-                $roomCap = (int) ($room->capacity ?? 2);
-                $maxAdults = (int) ($room->max_adults ?? $roomCap);
-                $roomInv = max(1, (int) ($room->total_inventory ?? 1));
+        // ─── Post-paginate availability filter (date-based, current page only) ───────
+        if ($isValidDateRange) {
+            $t2         = microtime(true);
+            $collection = $paginator->getCollection();
 
-                $singleRoomCapacityOk = ($roomCap >= $totalGuests) || ($maxAdults >= $adults);
+            $filtered = $collection->filter(function ($property) use (
+                $checkIn, $checkOut, $requiredRooms, $totalGuests, $adults, $children
+            ) {
+                $hasQualifiedRoom              = false;
+                $propertyAvailableInventorySum = 0;
+                $propertySatisfyingCapacitySum = 0;
 
-                $availableInventoryForRoom = $roomInv;
-                if ($isValidDateRange) {
+                foreach ($property->rooms as $room) {
+                    $roomCap    = (int) ($room->capacity ?? 2);
+                    $maxAdults  = (int) ($room->max_adults ?? $roomCap);
+                    $roomInv    = max(1, (int) ($room->total_inventory ?? 1));
+
+                    $singleRoomCapacityOk = ($roomCap >= $totalGuests) || ($maxAdults >= $adults);
+
+                    $availableInventoryForRoom = $roomInv;
+
+                    // Pass the already-loaded room model to avoid an extra Room::find() query
                     $availResult = $this->availabilityService->checkRoomAvailability(
                         $room->id,
                         $checkIn,
                         $checkOut,
-                        1
+                        1,
+                        null,
+                        null,
+                        $room  // <-- pre-loaded model, skips Room::find()
                     );
 
                     if (!$availResult['is_available']) {
                         continue;
                     }
+
                     $availableInventoryForRoom = $availResult['min_available_inventory'];
+
+                    if ($availableInventoryForRoom < 1) {
+                        continue;
+                    }
+
+                    if ($singleRoomCapacityOk && $availableInventoryForRoom >= $requiredRooms) {
+                        $hasQualifiedRoom = true;
+                        break;
+                    }
+
+                    $propertyAvailableInventorySum += $availableInventoryForRoom;
+                    $propertySatisfyingCapacitySum += ($roomCap * $availableInventoryForRoom);
                 }
 
-                if ($availableInventoryForRoom < 1) {
-                    continue;
+                if (!$hasQualifiedRoom && $requiredRooms > 1) {
+                    if ($propertyAvailableInventorySum >= $requiredRooms && $propertySatisfyingCapacitySum >= $totalGuests) {
+                        $hasQualifiedRoom = true;
+                    }
                 }
 
-                if ($singleRoomCapacityOk && $availableInventoryForRoom >= $requiredRooms) {
-                    $hasQualifiedRoom = true;
-                    break;
-                }
+                return $hasQualifiedRoom;
+            })->values();
 
-                $propertyAvailableInventorySum += $availableInventoryForRoom;
-                $propertySatisfyingCapacitySum += ($roomCap * $availableInventoryForRoom);
-            }
+            $paginator->setCollection($filtered);
 
-            if (!$hasQualifiedRoom && $requiredRooms > 1) {
-                if ($propertyAvailableInventorySum >= $requiredRooms && $propertySatisfyingCapacitySum >= $totalGuests) {
-                    $hasQualifiedRoom = true;
-                }
-            }
+            Log::info('PropertySearch: availability filter done', [
+                'before' => $collection->count(),
+                'after'  => $filtered->count(),
+                'avail_ms' => round((microtime(true) - $t2) * 1000),
+            ]);
+        }
 
-            return $hasQualifiedRoom;
-        })->values();
+        // ─── Add computed price fields to each result card item ──────────────────────
+        // (These were previously auto-appended by $appends on the model — now done here
+        //  so the model stays lean and the full detail page can handle its own formatting.)
+        $paginator->getCollection()->transform(function ($property) {
+            $base = (float) $property->price_per_night;
+            $property->customer_price_per_night = round($base * 1.01, 2);
+            $property->processing_fee_per_night = round($base * 0.01, 2);
+            $property->customer_price_formatted = 'TSh ' . number_format(round($base * 1.01));
+            $property->fee_note                 = 'Includes payment processing fee';
+            // Search cards need only one image per room. Do not send gallery
+            // payloads or make the frontend infer a cover photo.
+            $property->rooms->each(function ($room) {
+                $room->append('primary_image_url')->makeHidden(['photos', 'images']);
+            });
+            return $property;
+        });
 
-        $propertiesArray = $properties->toArray();
+        Log::info('PropertySearch: request done', [
+            'total_ms' => round((microtime(true) - $t0) * 1000),
+        ]);
 
-        if ($isCacheable) {
-            $ttl = empty($search) && empty($city) ? 1800 : 600;
+        // ─── Cache simple (no-date, no-filter) searches ──────────────────────────────
+        if ($isCacheable && $page === 1) {
+            $ttl      = empty($search) && empty($city) ? 1800 : 600;
             $cacheKey = $this->buildCacheKey($search, $city);
-            Cache::put($cacheKey, $propertiesArray, $ttl);
+            Cache::put($cacheKey, $paginator->toArray(), $ttl);
         }
 
         return [
-            'data' => $propertiesArray,
-            'cache_status' => 'MISS'
+            'paginator'    => $paginator,
+            'data'         => null,
+            'cache_status' => 'MISS',
         ];
     }
 
     protected function buildCacheKey(?string $search, ?string $city): string
     {
+        // Room-media updates bump this version, preventing stale serialized
+        // search cards from serving a previous primary image.
+        $version = (int) Cache::get('properties:search-version', 1);
         if (!empty($search)) {
             $normalized = strtolower(trim($search));
             $normalized = str_replace(['tanzania', ','], '', $normalized);
             $normalized = trim($normalized);
-            return 'search:' . ($normalized ?: 'all');
+            return 'search:' . ($normalized ?: 'all') . ':v' . $version;
         }
         if (!empty($city)) {
-            return 'properties:city:' . strtolower(trim($city));
+            return 'properties:city:' . strtolower(trim($city)) . ':v' . $version;
         }
-        return 'properties:all';
+        return 'properties:all:v' . $version;
     }
 }

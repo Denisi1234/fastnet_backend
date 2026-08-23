@@ -99,17 +99,23 @@ class BookingCreationService
                 ];
             }
 
-            $totalPrice = $calc['pricing']['total'];
+            $totalPrice = (float) $calc['pricing']['total'];
+            $commissionRate = 10.00; // Authoritative 10% platform fee
+            $platformFee = round($totalPrice * ($commissionRate / 100), 2);
+            $ownerPayout = round($totalPrice - $platformFee, 2);
 
             $booking = Booking::create([
-                'room_id'       => $roomId,
-                'guest_id'      => $guestId,
-                'check_in'      => $checkIn,
-                'check_out'     => $checkOut,
-                'total_price'   => $totalPrice,
-                'status'        => 'Pending',
-                'payment_status'=> 'pending',
-                'booking_code'  => 'BK' . strtoupper(Str::random(8)),
+                'room_id'         => $roomId,
+                'guest_id'        => $guestId,
+                'check_in'        => $checkIn,
+                'check_out'       => $checkOut,
+                'total_price'     => $totalPrice,
+                'commission_rate' => $commissionRate,
+                'platform_fee'    => $platformFee,
+                'owner_payout'    => $ownerPayout,
+                'status'          => 'Pending',
+                'payment_status'  => 'pending',
+                'booking_code'    => 'BK' . strtoupper(Str::random(8)),
             ]);
 
             RoomLock::where('room_id', $roomId)->where('guest_id', $guestId)->delete();

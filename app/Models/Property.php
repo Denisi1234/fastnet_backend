@@ -20,16 +20,14 @@ class Property extends Model
         'longitude',
         'host_id',
         'image_url',
+        'amenities',
         'status',
     ];
 
-    protected $appends = [
-        'customer_price_per_night',
-        'processing_fee_per_night',
-        'customer_price_formatted',
-        'fee_note',
-    ];
-
+    /**
+     * Compute the customer-facing price (base + 1% processing fee).
+     * Called explicitly where needed instead of auto-appending to every query result.
+     */
     public function getCustomerPricePerNightAttribute()
     {
         $base = (float) $this->price_per_night;

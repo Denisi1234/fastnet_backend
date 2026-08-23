@@ -16,6 +16,9 @@ class Booking extends Model
         'check_in',
         'check_out',
         'total_price',
+        'commission_rate',
+        'platform_fee',
+        'owner_payout',
         'status',
         'payment_status',
         'payment_reference',
@@ -24,6 +27,10 @@ class Booking extends Model
     protected $casts = [
         'check_in' => 'date',
         'check_out' => 'date',
+        'total_price' => 'float',
+        'commission_rate' => 'float',
+        'platform_fee' => 'float',
+        'owner_payout' => 'float',
     ];
 
     public function room()

@@ -35,6 +35,7 @@ class InvalidatePropertyCache implements ShouldQueue
             // 1. Invalidate the specific property detail cache
             if ($this->propertyId) {
                 Cache::forget("property:{$this->propertyId}");
+                Cache::forget("property:detail:{$this->propertyId}");
                 Log::info("Cache busted: property:{$this->propertyId}");
             }
 

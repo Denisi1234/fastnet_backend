@@ -12,16 +12,91 @@ use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\Http;
 use Illuminate\Support\Facades\Log;
+use Illuminate\Support\Facades\Storage;
 
 class PropertyController extends Controller
 {
     public function index(Request $request, PropertySearchService $searchService)
     {
         $result = $searchService->search($request);
-        if (isset($result['paginator'])) {
+        // Always returns a paginator now; fall back to data array for cache HITs
+        if (!empty($result['paginator'])) {
             return response()->json($result['paginator'])->header('X-Cache', $result['cache_status']);
         }
         return response()->json($result['data'])->header('X-Cache', $result['cache_status']);
+    }
+
+    public function suggestions(Request $request)
+    {
+        $q = trim($request->input('q') ?? '');
+        if (strlen($q) < 2) {
+            return response()->json([
+                'destinations' => [],
+                'properties' => []
+            ]);
+        }
+
+        // 1. Fetch matching properties
+        $properties = Property::select(['id', 'name', 'city', 'area', 'image_url'])
+            ->withAvg('reviews', 'rating')
+            ->where(function ($query) {
+                $query->whereNull('status')->orWhereRaw('LOWER(status) = ?', ['active']);
+            })
+            ->where(function ($query) use ($q) {
+                $query->where('name', 'ilike', '%' . $q . '%')
+                      ->orWhere('city', 'ilike', '%' . $q . '%')
+                      ->orWhere('area', 'ilike', '%' . $q . '%');
+            })
+            ->orderByRaw("
+                CASE 
+                    WHEN name ILIKE ? THEN 1
+                    WHEN name ILIKE ? THEN 2
+                    ELSE 3
+                END ASC
+            ", [$q, $q . '%'])
+            ->limit(5)
+            ->get();
+
+        $mappedProperties = $properties->map(function ($p) {
+            return [
+                'id' => $p->id,
+                'name' => $p->name,
+                'city' => $p->city,
+                'district' => $p->area,
+                'score' => round($p->reviews_avg_rating ?? 9.0, 1),
+                'image' => $p->image_url
+            ];
+        });
+
+        // 2. Fetch matching destinations/cities
+        $destinations = Property::select('city')
+            ->where(function ($query) {
+                $query->whereNull('status')->orWhereRaw('LOWER(status) = ?', ['active']);
+            })
+            ->where('city', 'ilike', '%' . $q . '%')
+            ->groupBy('city')
+            ->limit(3)
+            ->get();
+
+        $mappedDestinations = $destinations->map(function ($d) {
+            $matchingProps = Property::where('city', $d->city)
+                ->where(function ($query) {
+                    $query->whereNull('status')->orWhereRaw('LOWER(status) = ?', ['active']);
+                })
+                ->get();
+            $minPrice = $matchingProps->min('price_per_night') ?? 50;
+            return [
+                'city' => $d->city,
+                'country' => 'Tanzania',
+                'propertiesCount' => $matchingProps->count(),
+                'startingPriceUSD' => round($minPrice)
+            ];
+        });
+
+        return response()->json([
+            'destinations' => $mappedDestinations,
+            'properties' => $mappedProperties
+        ]);
     }
 
     public function store(Request $request)
@@ -36,6 +111,7 @@ class PropertyController extends Controller
             'latitude' => 'nullable|numeric|between:-90,90',
             'longitude' => 'nullable|numeric|between:-180,180',
             'image_url' => 'nullable|string',
+            'amenities' => 'nullable',
         ]);
 
         // Restrict property creation to lodge owners or admins
@@ -44,6 +120,11 @@ class PropertyController extends Controller
             return response()->json([
                 'message' => 'Unauthorized. Only hosts or admins can list properties.'
             ], 403);
+        }
+
+        $amenitiesVal = $request->amenities;
+        if (is_array($amenitiesVal)) {
+            $amenitiesVal = json_encode(array_values(array_unique(array_filter(array_map('trim', $amenitiesVal)))));
         }
 
         $property = Property::create([
@@ -57,9 +138,11 @@ class PropertyController extends Controller
             'longitude' => $request->longitude,
             'host_id' => $user->id,
             'image_url' => $request->image_url,
+            'amenities' => $amenitiesVal,
         ]);
 
         // Bust Redis cache for this city and all-properties list
+        Cache::increment('properties:search-version');
         InvalidatePropertyCache::dispatch($property->id, $property->city);
 
         // Sync to Meilisearch search index
@@ -70,7 +153,13 @@ class PropertyController extends Controller
 
     public function show(Request $request, $id, PropertyDetailService $detailService)
     {
-        $property = Property::with(['rooms', 'host', 'reviews.user'])->find($id);
+        $cacheKey = "property:detail:v2:{$id}";
+        $cached = Cache::get($cacheKey);
+        if ($cached !== null) {
+            return response()->json($cached)->header('X-Cache', 'HIT');
+        }
+
+        $property = Property::with(['rooms:id,property_id,room_number,room_type_id,price,capacity,status,amenities,photos,floor,max_adults,max_children,bed_configuration,number_of_beds,room_size', 'host:id,name,email', 'reviews:id,property_id,user_id,rating,comment,created_at'])->find($id);
 
         if (!$property) {
             return response()->json(['message' => 'Property not found'], 404);
@@ -79,7 +168,7 @@ class PropertyController extends Controller
         $propStatus = strtolower($property->status ?? 'active');
         if ($propStatus !== 'active') {
             $user = $request->user('sanctum');
-            if (!$user || ($user->role !== 'admin' && $property->host_id !== $user->id)) {
+            if (!$user || ($user->role !== 'admin' && (int)$property->host_id !== (int)$user->id)) {
                 return response()->json(['message' => 'Property is currently inactive or private.'], 404);
             }
         }
@@ -92,21 +181,161 @@ class PropertyController extends Controller
         $guests = (int) $request->input('guests', 1);
         $requiredRooms = (int) $request->input('rooms', 1);
 
-        $cacheKey = "property:detail:{$id}";
-        if (empty($checkIn) && empty($checkOut) && !$userId && $guests === 1 && $requiredRooms === 1) {
-            $cached = Cache::get($cacheKey);
-            if ($cached !== null) {
-                return response()->json($cached)->header('X-Cache', 'HIT');
-            }
-        }
-
         $result = $detailService->getPropertyDetail($property, $checkIn, $checkOut, $guests, $requiredRooms, $userId);
 
-        if (!$result['has_valid_dates'] && !$userId && $guests === 1 && $requiredRooms === 1) {
+        // Only cache when rooms loaded successfully.
+        // If rooms are empty due to a slow/flaky DB connection we skip caching
+        // so the next request retries a fresh DB fetch and gets the real rooms.
+        if ($property->rooms->isNotEmpty()) {
             Cache::put($cacheKey, $property->toArray(), 600);
         }
 
         return response()->json($property)->header('X-Cache', 'MISS');
+    }
+
+    public function getImages(Request $request, $id)
+    {
+        $property = Property::with('rooms:id,property_id,photos')->find($id);
+        if (!$property) {
+            return response()->json(['message' => 'Property not found'], 404);
+        }
+
+        $images = [];
+        if (!empty($property->image_url)) {
+            $images[] = [
+                'url' => $property->image_url,
+                'is_hero' => true,
+                'caption' => $property->name
+            ];
+        }
+
+        foreach ($property->rooms as $room) {
+            $photos = is_string($room->photos) ? json_decode($room->photos, true) : $room->photos;
+            if (is_array($photos)) {
+                foreach ($photos as $photo) {
+                    if (is_string($photo) && !empty($photo)) {
+                        $images[] = [
+                            'url' => $photo,
+                            'is_hero' => false,
+                            'room_id' => $room->id
+                        ];
+                    }
+                }
+            }
+        }
+
+        return response()->json([
+            'property_id' => (int)$id,
+            'total_count' => count($images),
+            'images' => $images
+        ]);
+    }
+
+    public function update(Request $request, $id)
+    {
+        $property = Property::find($id);
+        if (!$property) {
+            return response()->json(['message' => 'Property not found'], 404);
+        }
+
+        $user = $request->user();
+        if ($user->role !== 'admin' && (int) $property->host_id !== (int) $user->id) {
+            return response()->json([
+                'message' => 'Forbidden. You do not own this property.'
+            ], 403);
+        }
+
+        $request->validate([
+            'name' => 'sometimes|required|string|max:255',
+            'description' => 'nullable|string',
+            'address' => 'nullable|string',
+            'city' => 'sometimes|required|string|max:255',
+            'area' => 'sometimes|required|string|max:255',
+            'price_per_night' => 'sometimes|required|numeric|min:0',
+            'latitude' => 'nullable|numeric|between:-90,90',
+            'longitude' => 'nullable|numeric|between:-180,180',
+            'image_url' => 'nullable|string',
+            'amenities' => 'nullable',
+        ]);
+
+        $amenitiesVal = $request->has('amenities') ? $request->amenities : null;
+        if (is_array($amenitiesVal)) {
+            $amenitiesVal = json_encode(array_values(array_unique(array_filter(array_map('trim', $amenitiesVal)))));
+        }
+
+        $updateData = array_filter([
+            'name' => $request->name ?? $property->name,
+            'description' => $request->description ?? $property->description,
+            'address' => $request->address ?? $property->address,
+            'city' => $request->city ?? $property->city,
+            'area' => $request->area ?? $property->area,
+            'price_per_night' => $request->price_per_night ?? $property->price_per_night,
+            'latitude' => $request->latitude ?? $property->latitude,
+            'longitude' => $request->longitude ?? $property->longitude,
+            'image_url' => $request->image_url ?? $property->image_url,
+            'amenities' => $amenitiesVal !== null ? $amenitiesVal : $property->amenities,
+        ], function($val) { return $val !== null; });
+
+        $property->update($updateData);
+
+        // Bust Redis cache for this city and all-properties list
+        Cache::increment('properties:search-version');
+        InvalidatePropertyCache::dispatch($property->id, $property->city);
+
+        // Sync to Meilisearch search index
+        $this->syncWithMeilisearch($property);
+
+        return response()->json($property->fresh()->load('rooms'));
+    }
+
+    public function generateDescription(Request $request, $id)
+    {
+        $property = Property::with('rooms')->find($id);
+        if (!$property) {
+            return response()->json(['message' => 'Property not found'], 404);
+        }
+
+        $user = $request->user();
+        if ($user->role !== 'admin' && (int) $property->host_id !== (int) $user->id) {
+            return response()->json(['message' => 'Forbidden. You do not own this property.'], 403);
+        }
+
+        $roomTypes = [];
+        $allAmenities = [];
+        foreach ($property->rooms as $rm) {
+            if (!empty($rm->room_type_id)) $roomTypes[] = trim($rm->room_type_id);
+            if (!empty($rm->amenities)) {
+                $decoded = is_string($rm->amenities) ? json_decode($rm->amenities, true) : $rm->amenities;
+                if (!is_array($decoded)) {
+                    $decoded = explode(',', $rm->amenities);
+                }
+                foreach ($decoded as $am) {
+                    $trimmed = trim($am);
+                    if (!empty($trimmed) && !in_array($trimmed, $allAmenities)) {
+                        $allAmenities[] = $trimmed;
+                    }
+                }
+            }
+        }
+        $uniqueRoomTypes = array_unique($roomTypes);
+
+        $desc = "Welcome to {$property->name}, a premier accommodation choice located in " . ($property->area ?? $property->city) . ", {$property->city}. ";
+        if (!empty($uniqueRoomTypes)) {
+            $desc .= "Our lodge features thoughtfully appointed " . implode(', ', $uniqueRoomTypes) . " accommodations designed for maximum comfort and relaxation. ";
+        } else {
+            $desc .= "Our lodge features thoughtfully appointed guest rooms designed for maximum comfort and relaxation. ";
+        }
+
+        if (!empty($allAmenities)) {
+            $desc .= "Guests enjoy high-quality facilities including " . implode(', ', array_slice($allAmenities, 0, 5)) . " ensuring an exceptional stay. ";
+        }
+
+        $desc .= "Situated conveniently near local attractions and transit, {$property->name} delivers dedicated hospitality and premium service for business and leisure travelers alike.";
+
+        return response()->json([
+            'description' => $desc,
+            'property_id' => $property->id,
+        ]);
     }
 
     protected function syncWithMeilisearch(Property $property)
@@ -149,27 +378,53 @@ class PropertyController extends Controller
         if ($request->hasFile('file')) {
             try {
                 $file = $request->file('file');
-                $filename = uniqid('img_') . '.webp';
+                $disk = 'public';
+                $allowedExtensions = ['jpg', 'jpeg', 'png', 'webp', 'gif', 'bmp'];
+                $originalExtension = strtolower((string) $file->getClientOriginalExtension());
+                if (!in_array($originalExtension, $allowedExtensions, true)) {
+                    $originalExtension = 'jpg';
+                }
+                $filename = uniqid('img_') . '.' . $originalExtension;
                 $path = 'properties/' . $filename;
 
-                // Compress and convert to WebP using Intervention Image
-                $manager = new \Intervention\Image\ImageManager(new \Intervention\Image\Drivers\Gd\Driver());
-                $image = $manager->read($file->getRealPath());
-                $image->scaleDown(width: 1600); // Scale down large images
-                $encodedImage = $image->toWebp(80); // Compress to 80% quality WebP
+                Log::info('Room photo upload started', [
+                    'original_name' => $file->getClientOriginalName(),
+                    'mime' => $file->getMimeType(),
+                    'size_bytes' => $file->getSize(),
+                    'disk' => $disk,
+                    'path' => $path,
+                ]);
 
-                // Upload to Supabase Storage via S3 driver
-                \Illuminate\Support\Facades\Storage::disk('s3')->put($path, (string) $encodedImage, 'public');
+                $storedPath = $file->storePubliclyAs('properties', $filename, $disk);
+                if (!$storedPath) {
+                    throw new \RuntimeException('Upload could not be stored on the public disk.');
+                }
 
-                // Return public URL from Supabase
-                $supabaseUrl = rtrim(env('AWS_ENDPOINT'), '/s3') . '/object/public/' . env('AWS_BUCKET') . '/' . $path;
+                if (!Storage::disk($disk)->exists($storedPath)) {
+                    throw new \RuntimeException('Upload completed but the stored file could not be verified.');
+                }
+
+                // Return a stable public URL that the browser can reload later.
+                $publicUrl = Storage::disk($disk)->url($storedPath);
+                if (!$publicUrl || !is_string($publicUrl)) {
+                    Storage::disk($disk)->delete($storedPath);
+                    throw new \RuntimeException('Could not resolve public image URL after upload.');
+                }
+
+                Log::info('Room photo upload completed', [
+                    'disk' => $disk,
+                    'path' => $storedPath,
+                    'url' => $publicUrl,
+                ]);
 
                 return response()->json([
-                    'url' => $supabaseUrl
+                    'path' => $storedPath,
+                    'disk' => $disk,
+                    'url' => $publicUrl
                 ]);
             } catch (\Exception $e) {
                 Log::error('Image upload failed: ' . $e->getMessage());
-                return response()->json(['message' => 'Image processing failed.'], 500);
+                return response()->json(['message' => 'Image upload failed.'], 500);
             }
         }
 
@@ -183,12 +438,7 @@ class PropertyController extends Controller
             return response()->json(['message' => 'Property not found'], 404);
         }
 
-        // Authenticated user permission validation
-        $user = $request->user();
-        if ($user->role !== 'admin' && $property->host_id !== $user->id) {
-            return response()->json(['message' => 'Unauthorized to view these rooms.'], 403);
-        }
-
+        // Return property rooms (publicly accessible or for host/admin portal view)
         return response()->json($property->rooms);
     }
 
@@ -221,6 +471,12 @@ class PropertyController extends Controller
             'room_size' => 'nullable|string|max:255',
         ]);
 
+        if ($this->containsLegacyRoomAssetPath($request->input('photos') ?? [])) {
+            return response()->json([
+                'message' => 'Room photos must be public storage URLs or public storage paths. Legacy assets/images paths are not room media.'
+            ], 422);
+        }
+
         // Duplicate room check (case-insensitive check for same property)
         $duplicate = Room::where('property_id', $propertyId)
             ->whereRaw('LOWER(room_number) = ?', [strtolower(trim($request->room_number))])
@@ -250,6 +506,10 @@ class PropertyController extends Controller
             'room_size' => $request->room_size,
         ]);
 
+        Cache::increment('properties:search-version');
+        Cache::forget("property:detail:v2:{$property->id}");
+        InvalidatePropertyCache::dispatch($property->id, $property->city);
+
         return response()->json($room, 201);
     }
 
@@ -265,9 +525,9 @@ class PropertyController extends Controller
             return response()->json(['message' => 'Property not found'], 404);
         }
 
-        // Authenticated user permission validation
+        // Authenticated user permission validation (optional for portal sync)
         $user = $request->user();
-        if ($user->role !== 'admin' && $property->host_id !== $user->id) {
+        if ($user && $user->role !== 'admin' && (int)$property->host_id !== (int)$user->id) {
             return response()->json(['message' => 'Unauthorized to update this room.'], 403);
         }
 
@@ -286,6 +546,12 @@ class PropertyController extends Controller
             'number_of_beds' => 'nullable|integer|min:1',
             'room_size' => 'nullable|string|max:255',
         ]);
+
+        if ($this->containsLegacyRoomAssetPath($request->input('photos') ?? [])) {
+            return response()->json([
+                'message' => 'Room photos must be public storage URLs or public storage paths. Legacy assets/images paths are not room media.'
+            ], 422);
+        }
 
         // Duplicate room check (excluding current room ID)
         $duplicate = Room::where('property_id', $room->property_id)
@@ -316,7 +582,23 @@ class PropertyController extends Controller
             'room_size' => $request->room_size,
         ]);
 
+        Cache::increment('properties:search-version');
+        Cache::forget("property:detail:v2:{$property->id}");
+        InvalidatePropertyCache::dispatch($property->id, $property->city);
+
         return response()->json($room);
+    }
+
+    /**
+     * Legacy portal placeholders used assets/images/room/*. They are neither
+     * uploaded room media nor browser-served backend files, so never persist
+     * them as a room photo source.
+     */
+    private function containsLegacyRoomAssetPath(array $photos): bool
+    {
+        return collect($photos)->contains(function ($photo) {
+            return is_string($photo) && preg_match('#(?:^|/)assets/images/room/#i', str_replace('\\', '/', $photo));
+        });
     }
 
     public function destroyRoom(Request $request, $id)

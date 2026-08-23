@@ -265,10 +265,18 @@ class PaymentController extends Controller
                 'address' => $booking->room->property->address ?? 'Tanzania',
             ],
             'room' => [
-                'title' => $booking->room->title ?? 'Executive Room',
+                'title' => $booking->room->title ?? ($booking->room->room_number ? "Room {$booking->room->room_number}" : 'Executive Room'),
+                'room_number' => $booking->room->room_number ?? '1',
             ],
-            'check_in' => $booking->check_in,
-            'check_out' => $booking->check_out,
+            'guest' => [
+                'name' => $booking->guest->name ?? 'Valued Guest',
+                'email' => $booking->guest->email ?? '',
+                'phone' => $booking->guest->phone_number ?? '',
+            ],
+            'check_in' => $booking->check_in ? \Carbon\Carbon::parse($booking->check_in)->format('Y-m-d') : null,
+            'check_out' => $booking->check_out ? \Carbon\Carbon::parse($booking->check_out)->format('Y-m-d') : null,
+            'check_in_formatted' => $booking->check_in ? \Carbon\Carbon::parse($booking->check_in)->format('D, M j, Y') : null,
+            'check_out_formatted' => $booking->check_out ? \Carbon\Carbon::parse($booking->check_out)->format('D, M j, Y') : null,
         ]);
     }
 }

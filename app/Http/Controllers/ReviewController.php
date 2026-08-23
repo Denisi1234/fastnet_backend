@@ -56,23 +56,38 @@ class ReviewController extends Controller
 
     public function adminIndex(Request $request)
     {
-        try {
-            $reviews = Review::with(['user:id,name', 'property:id,name'])
-                ->orderBy('created_at', 'desc')
-                ->get()
-                ->map(function ($r) {
-                    return [
-                        'id' => $r->id,
-                        'user_name' => $r->user->name ?? 'Guest',
-                        'property_name' => $r->property->name ?? 'Unknown Property',
-                        'rating' => $r->rating,
-                        'comment' => $r->comment,
-                        'created_at' => $r->created_at,
-                    ];
-                });
-            return response()->json($reviews);
-        } catch (\Exception $e) {
-            return response()->json([]);
+        $user = $request->user();
+        $query = Review::with(['user:id,name', 'property:id,name'])->orderBy('created_at', 'desc');
+
+        if ($user->role !== 'admin') {
+            $ownerPropertyIds = \App\Models\Property::where('host_id', $user->id)->pluck('id')->toArray();
+            if (empty($ownerPropertyIds)) {
+                $query->whereRaw('1 = 0');
+            } else {
+                $query->whereIn('property_id', $ownerPropertyIds);
+            }
         }
+
+        $perPage = max(1, min(100, (int) $request->input('per_page', 15)));
+        $paginator = $query->paginate($perPage);
+
+        $transformed = collect($paginator->items())->map(function ($r) {
+            return [
+                'id' => $r->id,
+                'user_name' => $r->user->name ?? 'Guest',
+                'property_name' => $r->property->name ?? 'Lodge Stay',
+                'rating' => $r->rating,
+                'comment' => $r->comment,
+                'created_at' => $r->created_at ? $r->created_at->format('Y-m-d H:i:s') : null,
+            ];
+        });
+
+        return response()->json([
+            'current_page' => $paginator->currentPage(),
+            'per_page'     => $paginator->perPage(),
+            'total'        => $paginator->total(),
+            'last_page'    => $paginator->lastPage(),
+            'data'         => $transformed,
+        ]);
     }
 }

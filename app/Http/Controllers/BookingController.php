@@ -127,6 +127,32 @@ class BookingController extends Controller
 
         $roomId = $request->room_id;
         $guestUser = $request->user();
+
+        // If guest is not logged in, find or create customer record using the provided booking contact details
+        if (!$guestUser && $request->filled('guest_email')) {
+            $guestEmail = trim($request->input('guest_email'));
+            $guestName = trim($request->input('guest_name') ?? 'FastNet Guest');
+            $guestPhone = trim($request->input('guest_phone') ?? '');
+
+            $guestUser = \App\Models\User::firstOrCreate(
+                ['email' => $guestEmail],
+                [
+                    'name' => $guestName,
+                    'phone_number' => $guestPhone,
+                    'role' => 'customer',
+                    'password' => bcrypt(\Illuminate\Support\Str::random(16)),
+                ]
+            );
+
+            // Update phone or name if missing
+            if ($guestPhone && empty($guestUser->phone_number)) {
+                $guestUser->update(['phone_number' => $guestPhone]);
+            }
+            if ($guestName && ($guestUser->name === 'FastNet Guest' || empty($guestUser->name))) {
+                $guestUser->update(['name' => $guestName]);
+            }
+        }
+
         $guestId = $guestUser ? $guestUser->id : 1;
         $checkIn = $request->check_in;
         $checkOut = $request->check_out;

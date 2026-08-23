@@ -33,7 +33,10 @@ Route::middleware('throttle:60,1')->group(function () {
 
 // Public Property / Lodge discovery & Receipt / Notification routes
 Route::get('/properties', [PropertyController::class, 'index']);
+Route::get('/search/suggestions', [PropertyController::class, 'suggestions']);
 Route::get('/properties/{id}', [PropertyController::class, 'show']);
+Route::get('/properties/{id}/images', [PropertyController::class, 'getImages']);
+Route::get('/properties/{propertyId}/rooms', [PropertyController::class, 'getRooms']);
 Route::post('/receipts/generate', [BookingController::class, 'generateReceipt']);
 Route::get('/notifications/preferences', [\App\Http\Controllers\NotificationPreferenceController::class, 'getPreferences']);
 Route::post('/notifications/preferences', [\App\Http\Controllers\NotificationPreferenceController::class, 'updatePreferences']);
@@ -65,8 +68,11 @@ Route::post('/bookings/create', [BookingController::class, 'store']);
 // AzamPay Payment gateway routes (Public)
 Route::post('/payments/checkout', [PaymentController::class, 'checkout']);
 Route::post('/payments/webhook', [PaymentController::class, 'webhook']);
-Route::post('/payments/azampay/callback', [PaymentController::class, 'webhook']);
 Route::get('/payments/status/{codeOrId}', [PaymentController::class, 'status']);
+// File upload & Room management (Public)
+Route::post('/upload', [PropertyController::class, 'upload']);
+Route::put('/rooms/{id}', [PropertyController::class, 'updateRoom']);
+Route::delete('/rooms/{id}', [PropertyController::class, 'destroyRoom']);
 
 // Protected routes (require Sanctum API token authentication)
 Route::middleware('auth:sanctum')->group(function () {
@@ -81,11 +87,10 @@ Route::middleware('auth:sanctum')->group(function () {
     
     // Property listing (Hosts/Owners only)
     Route::post('/properties', [PropertyController::class, 'store']);
-    Route::post('/upload', [PropertyController::class, 'upload']);
+    Route::put('/properties/{id}', [PropertyController::class, 'update']);
+    Route::patch('/properties/{id}', [PropertyController::class, 'update']);
+    Route::post('/properties/{id}/generate-description', [PropertyController::class, 'generateDescription']);
     Route::post('/properties/{propertyId}/rooms', [PropertyController::class, 'storeRoom']);
-    Route::get('/properties/{propertyId}/rooms', [PropertyController::class, 'getRooms']);
-    Route::put('/rooms/{id}', [PropertyController::class, 'updateRoom']);
-    Route::delete('/rooms/{id}', [PropertyController::class, 'destroyRoom']);
     
     // Payment checkout initiation
     Route::post('/payments/checkout', [PaymentController::class, 'checkout']);
@@ -105,6 +110,9 @@ Route::middleware('auth:sanctum')->group(function () {
     Route::get('/admin/users', [AdminController::class, 'users']);
     Route::patch('/admin/users/{id}/status', [AdminController::class, 'updateUserStatus']);
     Route::post('/admin/users', [AdminController::class, 'addUser']);
+    Route::get('/admin/dashboard-stats', [\App\Http\Controllers\AdminController::class, 'dashboardStats']);
+    Route::get('/admin/owners/financial-summary', [AdminController::class, 'ownerFinancialSummary']);
+    Route::get('/admin/owners/{id}/financial-profile', [AdminController::class, 'ownerFinancialProfile']);
     Route::get('/admin/properties', [AdminController::class, 'properties']);
     Route::patch('/admin/properties/{id}/status', [AdminController::class, 'updatePropertyStatus']);
     Route::get('/admin/reviews', [ReviewController::class, 'adminIndex']);
@@ -143,6 +151,16 @@ Route::middleware('auth:sanctum')->group(function () {
     Route::get('/wishlist', [WishlistController::class, 'index']);
     Route::post('/wishlist', [WishlistController::class, 'store']);
     Route::delete('/wishlist/{property_id}', [WishlistController::class, 'destroy']);
+
+    // Finance & Payout Reports
+    Route::get('/finance/overview', [\App\Http\Controllers\FinanceController::class, 'overview']);
+    Route::get('/finance/ledger', [\App\Http\Controllers\FinanceController::class, 'ledger']);
+
+    // Owner & Admin Payout Management System
+    Route::get('/payouts', [\App\Http\Controllers\PayoutController::class, 'index']);
+    Route::get('/payouts/summary', [\App\Http\Controllers\PayoutController::class, 'summary']);
+    Route::post('/payouts/request', [\App\Http\Controllers\PayoutController::class, 'requestPayout']);
+    Route::patch('/payouts/{id}/status', [\App\Http\Controllers\PayoutController::class, 'updateStatus']);
 
     // Admin bookings
     Route::get('/admin/bookings', [AdminController::class, 'bookings']);

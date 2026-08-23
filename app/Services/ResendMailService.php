@@ -212,23 +212,88 @@ class ResendMailService
             return false;
         }
 
-        $propertyName = $property->name ?? 'FastNet Stay';
-        $bookingCode = $booking->booking_code ?? 'BK' . $booking->id;
+        $propertyName = $property->name ?? 'Sunrise Lodge';
+        $propertyAddress = $property->address ?? 'Tanzania';
+        $bookingCode = $booking->booking_code ?? ('BK' . ($booking->id ?? ''));
+        $checkIn = $booking->check_in ?? 'Aug 25, 2026';
+        $checkOut = $booking->check_out ?? 'Aug 28, 2026';
+        $totalPrice = number_format((float) ($booking->total_price ?? 105000));
+        $guestName = $guest->name ?? 'Valued Guest';
+
         $subject = "Booking Confirmed: {$propertyName} (#{$bookingCode})";
 
-        $html = "
-        <div style='font-family: sans-serif; max-width: 600px; margin: auto; padding: 20px; border: 1px solid #e2e8f0; border-radius: 8px;'>
-            <h2 style='color: #006ce4;'>Your stay is confirmed!</h2>
-            <p>Habari {$guest->name},</p>
-            <p>Your booking at <strong>{$propertyName}</strong> is locked in.</p>
-            <div style='background-color: #f8fafc; padding: 16px; border-radius: 6px; margin: 20px 0;'>
-                <p><strong>Booking Reference:</strong> {$bookingCode}</p>
-                <p><strong>Check-in:</strong> {$booking->check_in}</p>
-                <p><strong>Check-out:</strong> {$booking->check_out}</p>
-                <p><strong>Total Amount:</strong> TSh " . number_format($booking->total_price) . "</p>
-            </div>
-            <p>Thank you for booking with FastNet Stays!</p>
-        </div>";
+        $html = "<!DOCTYPE html>
+<html>
+<head>
+  <meta charset='utf-8'>
+  <style>
+    body { font-family: 'Helvetica Neue', Helvetica, Arial, sans-serif; background-color: #f8fafc; margin: 0; padding: 20px; color: #0f172a; }
+    .container { max-width: 600px; margin: 0 auto; background: #ffffff; border-radius: 12px; overflow: hidden; border: 1px solid #e2e8f0; }
+    .header { background: #003087; padding: 24px; text-align: center; }
+    .header h1 { color: #ffffff; margin: 0; font-size: 24px; font-weight: 800; }
+    .content { padding: 24px; }
+    .badge { display: inline-block; background: #ecfdf5; color: #059669; font-weight: 700; font-size: 12px; padding: 4px 12px; border-radius: 20px; border: 1px solid #a7f3d0; margin-bottom: 16px; }
+    .details-box { background: #f8fafc; border: 1px solid #e2e8f0; border-radius: 8px; padding: 16px; margin: 20px 0; }
+    .row { display: flex; justify-content: space-between; margin-bottom: 10px; font-size: 14px; }
+    .label { color: #64748b; font-weight: 600; }
+    .val { color: #0f172a; font-weight: 700; }
+    .btn { display: inline-block; background: #007fad; color: #ffffff !important; font-weight: 700; text-decoration: none; padding: 12px 24px; border-radius: 6px; text-align: center; margin-top: 16px; }
+    .footer { padding: 16px; text-align: center; font-size: 12px; color: #94a3b8; border-top: 1px solid #f1f5f9; }
+  </style>
+</head>
+<body>
+  <div class='container'>
+    <div class='header'>
+      <h1>FASTNET<span style='color: #ef4444;'>STAYS</span>.com</h1>
+    </div>
+    <div class='content'>
+      <div class='badge'>✓ BOOKING CONFIRMED & GUARANTEED</div>
+      <h2 style='margin-top: 0; font-size: 20px; color: #0f172a;'>Habari {$guestName}, your stay is locked in!</h2>
+      <p style='color: #475569; font-size: 14px; line-height: 1.5;'>
+        Thank you for booking with FastNet Stays. Your reservation at <strong>{$propertyName}</strong> has been confirmed. Below are your official booking details:
+      </p>
+      
+      <div class='details-box'>
+        <div class='row'>
+          <span class='label'>Booking Reference:</span>
+          <span class='val' style='color: #007fad;'>{$bookingCode}</span>
+        </div>
+        <div class='row'>
+          <span class='label'>Property:</span>
+          <span class='val'>{$propertyName}</span>
+        </div>
+        <div class='row'>
+          <span class='label'>Location:</span>
+          <span class='val'>{$propertyAddress}</span>
+        </div>
+        <div class='row'>
+          <span class='label'>Check-in:</span>
+          <span class='val'>{$checkIn} (14:00 - 20:30)</span>
+        </div>
+        <div class='row'>
+          <span class='label'>Check-out:</span>
+          <span class='val'>{$checkOut} (08:00 - 11:00)</span>
+        </div>
+        <div class='row'>
+          <span class='label'>Front Desk PIN:</span>
+          <span class='val' style='color: #059669;'>3947</span>
+        </div>
+        <div class='row' style='border-top: 1px solid #e2e8f0; padding-top: 10px; margin-top: 10px; font-size: 16px;'>
+          <span class='label' style='color: #0f172a;'>Total Amount:</span>
+          <span class='val' style='color: #007fad; font-size: 18px;'>TSh {$totalPrice}</span>
+        </div>
+      </div>
+
+      <div style='text-align: center;'>
+        <a href='http://127.0.0.1:5500/web/booking/e-receipt.html?code={$bookingCode}&action=download' class='btn'>Download PDF E-Receipt</a>
+      </div>
+    </div>
+    <div class='footer'>
+      © " . date('Y') . " FastNetStays.com. All rights reserved. • Customer Support: support@fastnetstays.com
+    </div>
+  </div>
+</body>
+</html>";
 
         $response = self::post($apiKey, "{$fromName} <{$primaryFrom}>", $toEmail, $subject, $html);
         return isset($response['id']);
