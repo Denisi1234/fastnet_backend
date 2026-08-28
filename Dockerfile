@@ -1,5 +1,5 @@
-# Build Stage
-FROM php:8.3-fpm-alpine AS builder
+# Build Stage (Using PHP 8.4 to support Symfony 8 and Laravel 13 dependencies)
+FROM php:8.4-fpm-alpine AS builder
 
 RUN apk add --no-cache \
     git \
@@ -19,18 +19,18 @@ RUN apk add --no-cache \
 RUN docker-php-ext-configure gd --with-freetype --with-jpeg --with-webp \
     && docker-php-ext-install pdo_mysql mbstring exif pcntl bcmath gd zip intl opcache
 
-COPY --from=composer:2.7 /usr/bin/composer /usr/bin/composer
+COPY --from=composer:2.8 /usr/bin/composer /usr/bin/composer
 
 WORKDIR /var/www/html
 
 COPY composer.json composer.lock ./
-RUN composer install --no-dev --no-scripts --no-autoloader --prefer-dist
+RUN composer install --no-dev --no-scripts --no-autoloader --prefer-dist --ignore-platform-reqs
 
 COPY . .
 RUN composer dump-autoload --optimize --no-dev
 
 # Production Runtime Stage
-FROM php:8.3-fpm-alpine
+FROM php:8.4-fpm-alpine
 
 RUN apk add --no-cache \
     nginx \

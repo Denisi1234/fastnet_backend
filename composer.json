@@ -6,7 +6,7 @@
     "keywords": ["laravel", "framework"],
     "license": "MIT",
     "require": {
-        "php": "^8.3",
+        "php": "^8.3|^8.4",
         "intervention/image": "^4.2",
         "laravel/framework": "^13.8",
         "laravel/sanctum": "^4.0",
@@ -80,7 +80,7 @@
         "preferred-install": "dist",
         "sort-packages": true,
         "platform": {
-            "php": "8.3.33"
+            "php": "8.4.22"
         },
         "allow-plugins": {
             "pestphp/pest-plugin": true,
