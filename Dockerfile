@@ -1,4 +1,4 @@
-# Build Stage (Using PHP 8.4 to support Symfony 8 and Laravel 13 dependencies)
+# Production Build Stage (PHP 8.4)
 FROM php:8.4-fpm-alpine AS builder
 
 RUN apk add --no-cache \
@@ -29,7 +29,7 @@ RUN composer install --no-dev --no-scripts --no-autoloader --prefer-dist --ignor
 COPY . .
 RUN composer dump-autoload --optimize --no-dev
 
-# Production Runtime Stage
+# Production Runtime Stage (PHP 8.4 + Nginx + Supervisord)
 FROM php:8.4-fpm-alpine
 
 RUN apk add --no-cache \
