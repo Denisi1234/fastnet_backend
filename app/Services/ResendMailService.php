@@ -222,6 +222,9 @@ class ResendMailService
 
         $subject = "Booking Confirmed: {$propertyName} (#{$bookingCode})";
 
+        $frontendBase = rtrim(env('FRONTEND_URL', env('APP_ENV') === 'production' ? 'https://fastnetstays.com' : 'http://127.0.0.1:5500/web'), '/');
+        $receiptDownloadUrl = "{$frontendBase}/booking/e-receipt.html?code={$bookingCode}&action=download";
+
         $html = "<!DOCTYPE html>
 <html>
 <head>
@@ -285,7 +288,7 @@ class ResendMailService
       </div>
 
       <div style='text-align: center;'>
-        <a href='http://127.0.0.1:5500/web/booking/e-receipt.html?code={$bookingCode}&action=download' class='btn'>Download PDF E-Receipt</a>
+        <a href='{$receiptDownloadUrl}' class='btn'>Download Official PDF E-Receipt</a>
       </div>
     </div>
     <div class='footer'>
@@ -296,6 +299,265 @@ class ResendMailService
 </html>";
 
         $response = self::post($apiKey, "{$fromName} <{$primaryFrom}>", $toEmail, $subject, $html);
+        return isset($response['id']);
+    }
+
+    public static function sendTicketConfirmationEmail($ticket, ?string $toEmail = null, ?string $userName = null): bool
+    {
+        $apiKey      = env('RESEND_API_KEY', '');
+        $primaryFrom = env('MAIL_FROM_ADDRESS', 'support@fastnetstays.com');
+        $fromName    = env('MAIL_FROM_NAME', 'FastNet Support');
+        
+        $email = $toEmail ?: ($ticket->user->email ?? null);
+        $name = $userName ?: ($ticket->user->name ?? 'Traveler');
+
+        if (!$email || !filter_var($email, FILTER_VALIDATE_EMAIL)) {
+            return false;
+        }
+
+        $ticketId = $ticket->id;
+        $issue = htmlspecialchars($ticket->issue ?? 'Support Request');
+        $portalUrl = "http://127.0.0.1:5500/web/support/chat.html?ticket={$ticketId}";
+
+        $subject = "Support Ticket #{$ticketId} Created: {$issue}";
+
+        $html = "<!DOCTYPE html>
+<html>
+<head>
+<meta charset='utf-8'>
+<style>
+  body { font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; background-color: #f8fafc; margin: 0; padding: 20px; color: #0f172a; }
+  .card { max-width: 600px; margin: 0 auto; background: #ffffff; border-radius: 16px; border: 1px solid #e2e8f0; overflow: hidden; }
+  .header { background: #002155; padding: 28px 32px; text-align: center; }
+  .header h1 { color: #ffffff; margin: 0; font-size: 22px; font-weight: 800; letter-spacing: -0.5px; }
+  .header h1 span { color: #febb02; }
+  .content { padding: 32px; }
+  .badge { display: inline-block; background: #eff6ff; color: #0055d4; font-size: 11px; font-weight: 700; padding: 4px 10px; border-radius: 6px; text-transform: uppercase; margin-bottom: 16px; border: 1px solid #bfdbfe; }
+  .box { background: #f8fafc; border: 1px solid #e2e8f0; border-radius: 12px; padding: 20px; margin: 20px 0; font-size: 13.5px; }
+  .row { display: flex; justify-content: space-between; margin-bottom: 8px; }
+  .row:last-child { margin-bottom: 0; }
+  .label { color: #64748b; font-weight: 500; }
+  .val { color: #0f172a; font-weight: 600; text-align: right; }
+  .btn { display: inline-block; background: #0055d4; color: #ffffff !important; text-decoration: none; padding: 12px 28px; border-radius: 10px; font-weight: 600; font-size: 14px; margin-top: 10px; }
+  .footer { padding: 20px 32px; background: #f8fafc; border-top: 1px solid #f1f5f9; font-size: 11px; color: #94a3b8; text-align: center; }
+</style>
+</head>
+<body>
+  <div class='card'>
+    <div class='header'>
+      <h1>FASTNET<span>STAYS</span></h1>
+    </div>
+    <div class='content'>
+      <div class='badge'>Support Request Received</div>
+      <h2 style='margin: 0 0 12px 0; font-size: 18px; color: #0f172a;'>Habari {$name},</h2>
+      <p style='color: #475569; font-size: 14px; line-height: 1.6; margin: 0 0 16px 0;'>
+        We have received your support inquiry. A customer service concierge has been assigned to your case and is reviewing your request.
+      </p>
+
+      <div class='box'>
+        <div class='row'>
+          <span class='label'>Ticket Reference:</span>
+          <span class='val' style='color: #0055d4; font-family: monospace;'>#{$ticketId}</span>
+        </div>
+        <div class='row'>
+          <span class='label'>Topic / Subject:</span>
+          <span class='val'>{$issue}</span>
+        </div>
+        <div class='row'>
+          <span class='label'>Status:</span>
+          <span class='val' style='color: #d97706;'>Open & Active</span>
+        </div>
+      </div>
+
+      <div style='text-align: center; margin: 24px 0 12px 0;'>
+        <a href='{$portalUrl}' class='btn'>View Ticket & Live Chat</a>
+      </div>
+      <p style='text-align: center; font-size: 12px; color: #94a3b8; margin: 8px 0 0 0;'>
+        You can reply directly in your browser without logging in.
+      </p>
+    </div>
+    <div class='footer'>
+      © " . date('Y') . " FastNetStays.com • 24/7 Concierge & Support Desk
+    </div>
+  </div>
+</body>
+</html>";
+
+        $response = self::post($apiKey, "{$fromName} <{$primaryFrom}>", $email, $subject, $html);
+        if (isset($response['statusCode']) && $response['statusCode'] === 403) {
+            $response = self::post($apiKey, "{$fromName} <onboarding@resend.dev>", $email, $subject, $html);
+        }
+        return isset($response['id']);
+    }
+
+    public static function sendTicketResolvedEmail($ticket, ?string $toEmail = null, ?string $userName = null): bool
+    {
+        $apiKey      = env('RESEND_API_KEY', '');
+        $primaryFrom = env('MAIL_FROM_ADDRESS', 'support@fastnetstays.com');
+        $fromName    = env('MAIL_FROM_NAME', 'FastNet Support');
+        
+        $email = $toEmail ?: ($ticket->user->email ?? null);
+        $name = $userName ?: ($ticket->user->name ?? 'Traveler');
+
+        if (!$email || !filter_var($email, FILTER_VALIDATE_EMAIL)) {
+            return false;
+        }
+
+        $ticketId = $ticket->id;
+        $issue = htmlspecialchars($ticket->issue ?? 'Support Request');
+        $portalUrl = "http://127.0.0.1:5500/web/support/chat.html?ticket={$ticketId}";
+
+        $subject = "[Resolved] Ticket #{$ticketId}: {$issue}";
+
+        $html = "<!DOCTYPE html>
+<html>
+<head>
+<meta charset='utf-8'>
+<style>
+  body { font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; background-color: #f8fafc; margin: 0; padding: 20px; color: #0f172a; }
+  .card { max-width: 600px; margin: 0 auto; background: #ffffff; border-radius: 16px; border: 1px solid #e2e8f0; overflow: hidden; }
+  .header { background: #002155; padding: 28px 32px; text-align: center; }
+  .header h1 { color: #ffffff; margin: 0; font-size: 22px; font-weight: 800; letter-spacing: -0.5px; }
+  .header h1 span { color: #febb02; }
+  .content { padding: 32px; }
+  .badge { display: inline-block; background: #ecfdf5; color: #059669; font-size: 11px; font-weight: 700; padding: 4px 10px; border-radius: 6px; text-transform: uppercase; margin-bottom: 16px; border: 1px solid #a7f3d0; }
+  .box { background: #f8fafc; border: 1px solid #e2e8f0; border-radius: 12px; padding: 20px; margin: 20px 0; font-size: 13.5px; }
+  .row { display: flex; justify-content: space-between; margin-bottom: 8px; }
+  .row:last-child { margin-bottom: 0; }
+  .label { color: #64748b; font-weight: 500; }
+  .val { color: #0f172a; font-weight: 600; text-align: right; }
+  .btn { display: inline-block; background: #0055d4; color: #ffffff !important; text-decoration: none; padding: 12px 28px; border-radius: 10px; font-weight: 600; font-size: 14px; margin-top: 10px; }
+  .footer { padding: 20px 32px; background: #f8fafc; border-top: 1px solid #f1f5f9; font-size: 11px; color: #94a3b8; text-align: center; }
+</style>
+</head>
+<body>
+  <div class='card'>
+    <div class='header'>
+      <h1>FASTNET<span>STAYS</span></h1>
+    </div>
+    <div class='content'>
+      <div class='badge'>✓ Case Resolved</div>
+      <h2 style='margin: 0 0 12px 0; font-size: 18px; color: #0f172a;'>Habari {$name},</h2>
+      <p style='color: #475569; font-size: 14px; line-height: 1.6; margin: 0 0 16px 0;'>
+        Your customer support ticket <strong>#{$ticketId}</strong> has been marked as resolved by our customer care team.
+      </p>
+
+      <div class='box'>
+        <div class='row'>
+          <span class='label'>Ticket Reference:</span>
+          <span class='val' style='color: #0055d4; font-family: monospace;'>#{$ticketId}</span>
+        </div>
+        <div class='row'>
+          <span class='label'>Topic / Subject:</span>
+          <span class='val'>{$issue}</span>
+        </div>
+        <div class='row'>
+          <span class='label'>Status:</span>
+          <span class='val' style='color: #059669; font-weight: 700;'>Resolved</span>
+        </div>
+      </div>
+
+      <div style='text-align: center; margin: 24px 0 12px 0;'>
+        <a href='{$portalUrl}' class='btn'>View Resolution & Transcript</a>
+      </div>
+      <p style='text-align: center; font-size: 12px; color: #94a3b8; margin: 8px 0 0 0;'>
+        Need further assistance? You can reopen this case anytime by sending a reply.
+      </p>
+    </div>
+    <div class='footer'>
+      © " . date('Y') . " FastNetStays.com • 24/7 Concierge & Support Desk
+    </div>
+  </div>
+</body>
+</html>";
+
+        $response = self::post($apiKey, "{$fromName} <{$primaryFrom}>", $email, $subject, $html);
+        if (isset($response['statusCode']) && $response['statusCode'] === 403) {
+            $response = self::post($apiKey, "{$fromName} <onboarding@resend.dev>", $email, $subject, $html);
+        }
+        return isset($response['id']);
+    }
+
+    public static function sendSubscriptionEmail(string $toEmail, string $type = 'general'): bool
+    {
+        $apiKey      = env('RESEND_API_KEY', '');
+        $primaryFrom = env('MAIL_FROM_ADDRESS', 'careers@fastnetstays.com');
+        $fromName    = env('MAIL_FROM_NAME', 'FastNetStays Careers');
+
+        if (!$toEmail || !filter_var($toEmail, FILTER_VALIDATE_EMAIL)) {
+            return false;
+        }
+
+        $subject = ($type === 'careers')
+            ? 'You are subscribed to Fastnetstays.com Career & Job Alerts'
+            : 'Welcome to FastNetStays Updates & News';
+
+        $headline = ($type === 'careers')
+            ? 'Career & Job Alerts Subscription'
+            : 'Newsletter Subscription Confirmed';
+
+        $description = ($type === 'careers')
+            ? 'Thank you for subscribing to Fastnetstays.com Career Alerts. You will be the first to receive notifications the moment our careers portal launches and positions open across Tanzania.'
+            : 'Thank you for subscribing to FastNetStays. You will receive the latest updates, hotel deals, and travel stories directly to your inbox.';
+
+        $html = '<!DOCTYPE html>
+        <html lang="en">
+        <head>
+            <meta charset="utf-8">
+            <meta name="viewport" content="width=device-width, initial-scale=1.0">
+            <title>' . htmlspecialchars($subject) . '</title>
+        </head>
+        <body style="margin: 0; padding: 0; background-color: #f8fafc; font-family: -apple-system, BlinkMacSystemFont, \'Segoe UI\', Roboto, Helvetica, Arial, sans-serif; color: #1e293b; -webkit-font-smoothing: antialiased; line-height: 1.6;">
+            <table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0" style="background-color: #f8fafc; padding: 40px 16px;">
+                <tr>
+                    <td align="center">
+                        <table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0" style="max-width: 520px; background-color: #ffffff; border: 1px solid #e2e8f0; border-radius: 12px; padding: 40px 36px; text-align: left; box-shadow: 0 1px 3px rgba(0,0,0,0.03);">
+                            <tr>
+                                <td style="padding-bottom: 24px; border-bottom: 1px solid #f1f5f9;">
+                                    <div style="font-size: 22px; font-weight: 800; font-family: -apple-system, BlinkMacSystemFont, \'Segoe UI\', Roboto, sans-serif; letter-spacing: -0.5px; line-height: 1;">
+                                        <span style="color: #0f172a;">FASTNET</span><span style="color: #ea580c;">STAYS</span><span style="color: #006CE4; font-size: 17px; font-weight: 700;">.com</span>
+                                    </div>
+                                </td>
+                            </tr>
+                            <tr>
+                                <td style="padding-top: 24px;">
+                                    <div style="display: inline-block; background-color: #ffedd5; color: #ea580c; font-size: 11px; font-weight: 700; padding: 4px 10px; border-radius: 6px; text-transform: uppercase; margin-bottom: 16px;">
+                                        ' . htmlspecialchars($headline) . '
+                                    </div>
+                                    <h1 style="margin: 0 0 16px 0; font-size: 20px; font-weight: 700; color: #0f172a;">
+                                        Subscription Confirmed
+                                    </h1>
+                                    <p style="margin: 0 0 16px 0; font-size: 15px; color: #334155;">
+                                        ' . htmlspecialchars($description) . '
+                                    </p>
+                                    <div style="background-color: #f8fafc; border-radius: 8px; border: 1px solid #e2e8f0; padding: 16px; margin-bottom: 24px;">
+                                        <p style="margin: 0; font-size: 13px; color: #64748b;">
+                                            <strong>Subscribed Email:</strong> ' . htmlspecialchars($toEmail) . '
+                                        </p>
+                                    </div>
+                                    <p style="margin: 0; font-size: 13px; color: #94a3b8;">
+                                        If you did not request this, you can safely disregard this email or unsubscribe at any time.
+                                    </p>
+                                </td>
+                            </tr>
+                            <tr>
+                                <td style="padding-top: 32px; border-top: 1px solid #f1f5f9; text-align: center; font-size: 12px; color: #94a3b8;">
+                                    &copy; ' . date('Y') . ' Fastnetstays.com. Dar es Salaam, Tanzania.
+                                </td>
+                            </tr>
+                        </table>
+                    </td>
+                </tr>
+            </table>
+        </body>
+        </html>';
+
+        $response = self::post($apiKey, "{$fromName} <{$primaryFrom}>", $toEmail, $subject, $html);
+
+        if (isset($response['statusCode']) && $response['statusCode'] === 403) {
+            $response = self::post($apiKey, "{$fromName} <onboarding@resend.dev>", $toEmail, $subject, $html);
+        }
+
         return isset($response['id']);
     }
 

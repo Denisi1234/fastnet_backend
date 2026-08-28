@@ -45,6 +45,10 @@ Route::post('/travel/preferences', [\App\Http\Controllers\TravelPreferenceContro
 Route::get('/support/help-centre', [\App\Http\Controllers\SupportController::class, 'getHelpCentreData']);
 Route::get('/user/personal-details', [\App\Http\Controllers\PersonalDetailsController::class, 'getDetails']);
 Route::post('/user/personal-details', [\App\Http\Controllers\PersonalDetailsController::class, 'updateDetails']);
+Route::get('/alerts', [\App\Http\Controllers\AlertController::class, 'index']);
+Route::post('/alerts', [\App\Http\Controllers\AlertController::class, 'store']);
+Route::delete('/alerts/{id}', [\App\Http\Controllers\AlertController::class, 'destroy']);
+Route::get('/currencies', [\App\Http\Controllers\CurrencyController::class, 'index']);
 Route::get('/map-config', function () {
     return response()->json([
         'mapbox_token' => env('MAPBOX_API_KEY', 'YOUR_MAPBOX_ACCESS_TOKEN'),
@@ -57,6 +61,9 @@ Route::get('/properties/{id}/reviews', [ReviewController::class, 'index']);
 
 // Newsletter subscription (Public)
 Route::post('/subscribe', [NewsletterSubscriptionController::class, 'subscribe']);
+
+// Accessibility Feedback (Public)
+Route::post('/feedback/accessibility', [\App\Http\Controllers\AccessibilityFeedbackController::class, 'store']);
 
 // Booking calculation, revalidation & creation (Public)
 Route::post('/bookings/calculate', [BookingController::class, 'calculate']);
@@ -102,8 +109,10 @@ Route::middleware('auth:sanctum')->group(function () {
 
     // Ticket routes
     Route::get('/tickets', [TicketController::class, 'index']);
+    Route::get('/tickets/{id}', [TicketController::class, 'show']);
     Route::post('/tickets', [TicketController::class, 'store']);
     Route::post('/tickets/{id}/messages', [TicketController::class, 'sendMessage']);
+    Route::post('/tickets/{id}/reply', [TicketController::class, 'sendMessage']);
     Route::patch('/tickets/{id}/status', [TicketController::class, 'updateStatus']);
 
     // Admin routes

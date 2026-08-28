@@ -216,6 +216,9 @@ class PaymentController extends Controller
                 if ($booking->room) {
                     $booking->room->update(['status' => 'booked']);
                 }
+
+                \App\Jobs\SendBookingConfirmationEmail::dispatch($booking->id)->onQueue('notifications');
+                \App\Jobs\SendBookingConfirmationSms::dispatch($booking->id)->onQueue('notifications');
             } else if (in_array($status, ['failed', 'cancelled', 'expired'])) {
                 $booking->update([
                     'payment_status' => $status,

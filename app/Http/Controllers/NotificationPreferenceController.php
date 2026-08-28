@@ -14,14 +14,15 @@ class NotificationPreferenceController extends Controller
     public function getPreferences(Request $request)
     {
         $userId = $request->user() ? $request->user()->id : ($request->input('user_id') ?? 'guest');
-        $cacheKey = "user_notification_prefs_{$userId}";
+        $cacheKey = "user_email_preferences_{$userId}";
 
         $defaultPrefs = [
-            'booking_updates' => true,
-            'property_messages' => true,
-            'checkin_reminders' => true,
+            'feedback_research' => false,
             'price_alerts' => false,
-            'offers_inspiration' => false,
+            'travel_tips_deals' => false,
+            'unsubscribe_all' => true,
+            'booking_updates' => true,
+            'account_legal_notices' => true,
         ];
 
         $preferences = Cache::get($cacheKey, $defaultPrefs);
@@ -35,44 +36,61 @@ class NotificationPreferenceController extends Controller
     }
 
     /**
-     * Update user notification preferences.
+     * Update user notification / email preferences.
      */
     public function updatePreferences(Request $request)
     {
         $request->validate([
-            'booking_updates' => 'nullable|boolean',
-            'property_messages' => 'nullable|boolean',
-            'checkin_reminders' => 'nullable|boolean',
+            'feedback_research' => 'nullable|boolean',
             'price_alerts' => 'nullable|boolean',
-            'offers_inspiration' => 'nullable|boolean',
+            'travel_tips_deals' => 'nullable|boolean',
+            'unsubscribe_all' => 'nullable|boolean',
+            'booking_updates' => 'nullable|boolean',
+            'account_legal_notices' => 'nullable|boolean',
         ]);
 
         $userId = $request->user() ? $request->user()->id : ($request->input('user_id') ?? 'guest');
-        $cacheKey = "user_notification_prefs_{$userId}";
+        $cacheKey = "user_email_preferences_{$userId}";
 
         $existing = Cache::get($cacheKey, [
-            'booking_updates' => true,
-            'property_messages' => true,
-            'checkin_reminders' => true,
+            'feedback_research' => false,
             'price_alerts' => false,
-            'offers_inspiration' => false,
+            'travel_tips_deals' => false,
+            'unsubscribe_all' => true,
+            'booking_updates' => true,
+            'account_legal_notices' => true,
         ]);
 
+        $feedback = $request->has('feedback_research') ? filter_var($request->input('feedback_research'), FILTER_VALIDATE_BOOLEAN) : $existing['feedback_research'];
+        $price = $request->has('price_alerts') ? filter_var($request->input('price_alerts'), FILTER_VALIDATE_BOOLEAN) : $existing['price_alerts'];
+        $travel = $request->has('travel_tips_deals') ? filter_var($request->input('travel_tips_deals'), FILTER_VALIDATE_BOOLEAN) : $existing['travel_tips_deals'];
+        
+        $unsub = $request->has('unsubscribe_all') 
+            ? filter_var($request->input('unsubscribe_all'), FILTER_VALIDATE_BOOLEAN) 
+            : (!$feedback && !$price && !$travel);
+
+        if ($unsub && $request->has('unsubscribe_all') && filter_var($request->input('unsubscribe_all'), FILTER_VALIDATE_BOOLEAN)) {
+            $feedback = false;
+            $price = false;
+            $travel = false;
+        }
+
         $updated = [
-            'booking_updates' => $request->has('booking_updates') ? filter_var($request->input('booking_updates'), FILTER_VALIDATE_BOOLEAN) : $existing['booking_updates'],
-            'property_messages' => $request->has('property_messages') ? filter_var($request->input('property_messages'), FILTER_VALIDATE_BOOLEAN) : $existing['property_messages'],
-            'checkin_reminders' => $request->has('checkin_reminders') ? filter_var($request->input('checkin_reminders'), FILTER_VALIDATE_BOOLEAN) : $existing['checkin_reminders'],
-            'price_alerts' => $request->has('price_alerts') ? filter_var($request->input('price_alerts'), FILTER_VALIDATE_BOOLEAN) : $existing['price_alerts'],
-            'offers_inspiration' => $request->has('offers_inspiration') ? filter_var($request->input('offers_inspiration'), FILTER_VALIDATE_BOOLEAN) : $existing['offers_inspiration'],
+            'feedback_research' => $feedback,
+            'price_alerts' => $price,
+            'travel_tips_deals' => $travel,
+            'unsubscribe_all' => $unsub,
+            'booking_updates' => true,
+            'account_legal_notices' => true,
         ];
 
         Cache::put($cacheKey, $updated, now()->addDays(365));
 
-        Log::info("Notification preferences updated for user {$userId}:", $updated);
+        Log::info("Email preferences updated for user {$userId}:", $updated);
 
         return response()->json([
             'status' => 'success',
-            'message' => 'Notification preferences updated successfully.',
+            'message' => 'Email preferences updated successfully.',
             'preferences' => $updated,
             'updated_at' => now()->toIso8601String(),
         ]);

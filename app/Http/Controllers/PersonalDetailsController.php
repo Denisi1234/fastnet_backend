@@ -13,16 +13,18 @@ class PersonalDetailsController extends Controller
      */
     public function getDetails(Request $request)
     {
-        $userId = $request->user() ? $request->user()->id : ($request->input('user_id') ?? 'guest');
+        $user = $request->user();
+        $userId = $user ? $user->id : ($request->input('user_id') ?? 'guest');
         $cacheKey = "user_personal_details_{$userId}";
 
         $defaultDetails = [
-            'full_name' => 'Maya Thompson',
-            'email' => 'maya.thompson@email.com',
-            'phone_number' => '+1 415 555 0184',
-            'date_of_birth' => '12 May 1994',
-            'identity_document' => 'Not added',
-            'avatar_url' => 'https://images.unsplash.com/photo-1494790108377-be9c29b29330?ixlib=rb-4.0.3&auto=format&fit=crop&w=200&q=80',
+            'first_name' => $user ? ($user->first_name ?? explode(' ', $user->name)[0]) : 'Deni_s',
+            'last_name' => $user ? ($user->last_name ?? (explode(' ', $user->name)[1] ?? 'Mahenge')) : 'Mahenge',
+            'full_name' => $user ? $user->name : 'Deni_s Mahenge',
+            'email' => $user ? $user->email : 'dm328432@gmail.com',
+            'phone_number' => $user ? ($user->phone_number ?? '+255 712 345 678') : '+255 712 345 678',
+            'is_verified' => true,
+            'avatar_url' => 'https://images.unsplash.com/photo-1531427186611-ecfd6d936c79?auto=format&fit=crop&w=200&q=80',
         ];
 
         $details = Cache::get($cacheKey, $defaultDetails);
@@ -41,33 +43,39 @@ class PersonalDetailsController extends Controller
     public function updateDetails(Request $request)
     {
         $request->validate([
+            'first_name' => 'nullable|string|max:100',
+            'last_name' => 'nullable|string|max:100',
             'full_name' => 'nullable|string|max:255',
             'email' => 'nullable|email|max:255',
             'phone_number' => 'nullable|string|max:50',
-            'date_of_birth' => 'nullable|string|max:50',
-            'identity_document' => 'nullable|string|max:100',
         ]);
 
-        $userId = $request->user() ? $request->user()->id : ($request->input('user_id') ?? 'guest');
+        $user = $request->user();
+        $userId = $user ? $user->id : ($request->input('user_id') ?? 'guest');
         $cacheKey = "user_personal_details_{$userId}";
 
-        $existing = Cache::get($cacheKey, [
-            'full_name' => 'Maya Thompson',
-            'email' => 'maya.thompson@email.com',
-            'phone_number' => '+1 415 555 0184',
-            'date_of_birth' => '12 May 1994',
-            'identity_document' => 'Not added',
-            'avatar_url' => 'https://images.unsplash.com/photo-1494790108377-be9c29b29330?ixlib=rb-4.0.3&auto=format&fit=crop&w=200&q=80',
-        ]);
+        $firstName = $request->input('first_name', 'Deni_s');
+        $lastName = $request->input('last_name', 'Mahenge');
+        $fullName = $request->input('full_name', "{$firstName} {$lastName}");
+        $email = $request->input('email', 'dm328432@gmail.com');
 
         $updated = [
-            'full_name' => $request->input('full_name', $existing['full_name']),
-            'email' => $request->input('email', $existing['email']),
-            'phone_number' => $request->input('phone_number', $existing['phone_number']),
-            'date_of_birth' => $request->input('date_of_birth', $existing['date_of_birth']),
-            'identity_document' => $request->input('identity_document', $existing['identity_document']),
-            'avatar_url' => $existing['avatar_url'],
+            'first_name' => $firstName,
+            'last_name' => $lastName,
+            'full_name' => $fullName,
+            'email' => $email,
+            'phone_number' => $request->input('phone_number', '+255 712 345 678'),
+            'is_verified' => true,
+            'avatar_url' => 'https://images.unsplash.com/photo-1531427186611-ecfd6d936c79?auto=format&fit=crop&w=200&q=80',
         ];
+
+        if ($user) {
+            $user->name = $fullName;
+            $user->email = $email;
+            if (isset($user->first_name)) $user->first_name = $firstName;
+            if (isset($user->last_name)) $user->last_name = $lastName;
+            $user->save();
+        }
 
         Cache::put($cacheKey, $updated, now()->addDays(365));
 
