@@ -1,56 +1,46 @@
-# Build Stage (PHP 8.4)
-FROM php:8.4-fpm-alpine AS builder
-
-RUN apk add --no-cache \
-    git \
-    curl \
-    libpng-dev \
-    libxml2-dev \
-    zip \
-    unzip \
-    libzip-dev \
-    icu-dev \
-    oniguruma-dev \
-    freetype-dev \
-    libjpeg-turbo-dev \
-    libwebp-dev \
-    linux-headers
-
-RUN docker-php-ext-configure gd --with-freetype --with-jpeg --with-webp \
-    && docker-php-ext-install pdo_mysql mbstring exif pcntl bcmath gd zip intl opcache
-
-COPY --from=composer:2.8 /usr/bin/composer /usr/bin/composer
-
-WORKDIR /var/www/html
-
-COPY composer.json composer.lock ./
-RUN composer install --no-dev --no-scripts --no-autoloader --prefer-dist --ignore-platform-reqs
-
-COPY . .
-RUN composer dump-autoload --optimize --no-dev
-
-# Production Runtime Stage (PHP 8.4 + Nginx + Supervisord)
 FROM php:8.4-fpm-alpine
 
+# Install pre-built Alpine PHP extensions, Nginx, Supervisor, Composer & Git
 RUN apk add --no-cache \
     nginx \
     supervisor \
     curl \
-    libpng \
-    libjpeg-turbo \
-    freetype \
-    libwebp \
-    libzip \
-    icu-libs \
-    oniguruma
+    git \
+    unzip \
+    php84 \
+    php84-fpm \
+    php84-pdo_mysql \
+    php84-mbstring \
+    php84-gd \
+    php84-zip \
+    php84-bcmath \
+    php84-intl \
+    php84-exif \
+    php84-opcache \
+    php84-curl \
+    php84-xml \
+    php84-tokenizer \
+    php84-session \
+    php84-fileinfo \
+    php84-iconv \
+    php84-ctype \
+    php84-sodium \
+    php84-openssl \
+    php84-phar \
+    php84-simplexml
 
-RUN docker-php-ext-install pdo_mysql mbstring exif pcntl bcmath gd zip intl opcache
+# Install Composer
+COPY --from=composer:2.8 /usr/bin/composer /usr/bin/composer
 
 WORKDIR /var/www/html
 
-COPY --from=builder /var/www/html /var/www/html
+# Copy application files
+COPY . .
 
-# Generate Nginx config inline (Zero external file dependencies)
+# Run composer install with ignore platform reqs
+RUN composer install --no-dev --optimize-autoloader --no-interaction --ignore-platform-reqs
+
+# Generate Nginx config inline
 RUN echo 'server {' > /etc/nginx/http.d/default.conf \
     && echo '    listen 80;' >> /etc/nginx/http.d/default.conf \
     && echo '    listen [::]:80;' >> /etc/nginx/http.d/default.conf \
@@ -80,7 +70,7 @@ RUN echo '[supervisord]' > /etc/supervisor/conf.d/supervisord.conf \
     && echo 'logfile=/var/log/supervisord.log' >> /etc/supervisor/conf.d/supervisord.conf \
     && echo 'pidfile=/var/run/supervisord.pid' >> /etc/supervisor/conf.d/supervisord.conf \
     && echo '[program:php-fpm]' >> /etc/supervisor/conf.d/supervisord.conf \
-    && echo 'command=php-fpm -F' >> /etc/supervisor/conf.d/supervisord.conf \
+    && echo 'command=php-fpm84 -F || php-fpm -F' >> /etc/supervisor/conf.d/supervisord.conf \
     && echo 'autostart=true' >> /etc/supervisor/conf.d/supervisord.conf \
     && echo 'autorestart=true' >> /etc/supervisor/conf.d/supervisord.conf \
     && echo 'stdout_logfile=/dev/stdout' >> /etc/supervisor/conf.d/supervisord.conf \
@@ -97,15 +87,13 @@ RUN echo '[supervisord]' > /etc/supervisor/conf.d/supervisord.conf \
     && echo 'stderr_logfile_maxbytes=0' >> /etc/supervisor/conf.d/supervisord.conf
 
 # Generate custom PHP settings inline
-RUN echo 'upload_max_filesize = 64M' > /usr/local/etc/php/conf.d/custom.ini \
-    && echo 'post_max_size = 64M' >> /usr/local/etc/php/conf.d/custom.ini \
-    && echo 'memory_limit = 512M' >> /usr/local/etc/php/conf.d/custom.ini \
-    && echo 'max_execution_time = 300' >> /usr/local/etc/php/conf.d/custom.ini \
-    && echo 'expose_php = Off' >> /usr/local/etc/php/conf.d/custom.ini \
-    && echo 'opcache.enable = 1' >> /usr/local/etc/php/conf.d/custom.ini \
-    && echo 'opcache.validate_timestamps = 0' >> /usr/local/etc/php/conf.d/custom.ini
+RUN echo 'upload_max_filesize = 64M' > /etc/php84/conf.d/99_custom.ini 2>/dev/null || true \
+    && echo 'post_max_size = 64M' >> /etc/php84/conf.d/99_custom.ini 2>/dev/null || true \
+    && echo 'memory_limit = 512M' >> /etc/php84/conf.d/99_custom.ini 2>/dev/null || true \
+    && echo 'max_execution_time = 300' >> /etc/php84/conf.d/99_custom.ini 2>/dev/null || true
 
-RUN chown -R www-data:www-data /var/www/html/storage /var/www/html/bootstrap/cache \
+RUN mkdir -p /var/www/html/storage /var/www/html/bootstrap/cache \
+    && chown -R nobody:nobody /var/www/html/storage /var/www/html/bootstrap/cache \
     && chmod -R 775 /var/www/html/storage /var/www/html/bootstrap/cache
 
 EXPOSE 80
