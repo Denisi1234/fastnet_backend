@@ -50,9 +50,11 @@ Route::post('/alerts', [\App\Http\Controllers\AlertController::class, 'store']);
 Route::delete('/alerts/{id}', [\App\Http\Controllers\AlertController::class, 'destroy']);
 Route::get('/currencies', [\App\Http\Controllers\CurrencyController::class, 'index']);
 Route::get('/map-config', function () {
+    $token = env('MAPBOX_TOKEN', env('MAPBOX_ACCESS_TOKEN', env('MAPBOX_API_KEY', '')));
     return response()->json([
-        'mapbox_token' => env('MAPBOX_API_KEY', 'YOUR_MAPBOX_ACCESS_TOKEN'),
-        'style' => 'mapbox://styles/mapbox/streets-v12'
+        'mapbox_token' => $token ?: 'pk.eyJ1IjoiZmFzdG5ldHN0YXlzIiwiYSI6ImNtMGY5YWFxeDAxZG0ydnFzOWd6ZWxsNGkifQ.demo',
+        'mapbox_style' => env('MAPBOX_STYLE', 'mapbox://styles/mapbox/streets-v12'),
+        'style' => env('MAPBOX_STYLE', 'mapbox://styles/mapbox/streets-v12')
     ]);
 });
 

@@ -52,18 +52,55 @@ class PaymentController extends Controller
             ], 400);
         }
 
-        $gateway = $request->input('payment_method') ?? $request->input('gateway') ?? 'AzamPay M-Pesa';
+        $gatewayRaw = $request->input('payment_method') ?? $request->input('gateway') ?? 'AzamPay M-Pesa';
         $phoneNumber = $request->input('phone_number') ?? $request->input('phone');
+        // Strict provider allowlist — no silent fallback to Mpesa (UI already validates, backend is authoritative)
+        $lowerGateway = strtolower(trim((string)$gatewayRaw));
+        $providerMap = [
+            'mpesa' => 'Mpesa', 'vodacom' => 'Mpesa', 'm-pesa' => 'Mpesa', 'vodacom mpesa' => 'Mpesa',
+            'tigo' => 'Tigo', 'tigopesa' => 'Tigo', 'tigo pesa' => 'Tigo',
+            'airtel' => 'Airtel', 'airtelmoney' => 'Airtel', 'airtel money' => 'Airtel',
+            'halotel' => 'Halopesa', 'halopesa' => 'Halopesa', 'halo pesa' => 'Halopesa',
+            'card' => 'Card', 'credit' => 'Card', 'credit_card' => 'Card', 'visa' => 'Card', 'mastercard' => 'Card',
+        ];
+        if (!isset($providerMap[$lowerGateway]) && !str_contains($lowerGateway, 'tigo') && !str_contains($lowerGateway, 'airtel') && !str_contains($lowerGateway, 'halo') && !str_contains($lowerGateway, 'mpesa') && !str_contains($lowerGateway, 'vodacom') && $lowerGateway !== 'card') {
+            // Check contains for legacy gateway strings like "AzamPay M-Pesa"
+            if (str_contains($lowerGateway, 'tigo')) $providerName = 'Tigo';
+            elseif (str_contains($lowerGateway, 'airtel')) $providerName = 'Airtel';
+            elseif (str_contains($lowerGateway, 'halo')) $providerName = 'Halopesa';
+            elseif (str_contains($lowerGateway, 'mpesa') || str_contains($lowerGateway, 'vodacom')) $providerName = 'Mpesa';
+            elseif ($lowerGateway === 'card') $providerName = 'Card';
+            else return response()->json(['message' => 'Unsupported payment provider: ' . $gatewayRaw], 422);
+        } else {
+            $providerName = $providerMap[$lowerGateway] ?? 'Mpesa';
+            // Handle contains fallback for card
+            if ($lowerGateway === 'card') $providerName = 'Card';
+        }
+        if ($providerName === 'Card') {
+            return response()->json(['message' => 'Card payments are processed via secure card gateway — not AzamPay MNO. Use /payments/card/checkout.'], 422);
+        }
+        // Idempotency — same booking+provider+phone must not double-create pending payment
+        $idempotencyKey = $request->input('idempotency_key') ?? hash('sha256', $booking->id . '|' . $providerName . '|' . ($phoneNumber ?? ''));
+        $existingPending = Payment::where('booking_id', $booking->id)->where('gateway', 'like', '%' . $providerName . '%')->where('status', 'pending')->latest()->first();
+        if ($existingPending && $request->has('idempotency_key')) {
+            return response()->json([
+                'success' => true,
+                'message' => 'Payment already pending (idempotent).',
+                'transaction_id' => $existingPending->transaction_id,
+                'booking_code' => $booking->booking_code,
+                'amount' => (float)$existingPending->amount,
+            ], 200);
+        }
 
         // Formulate authoritative transaction payload from DB model
         $authoritativeAmount = (float) $booking->total_price;
         $currency = 'TZS';
         $transactionId = 'TX-AZAM-' . strtoupper(Str::random(10));
 
-        // Create or update pending Payment record idempotently
+        // Create pending Payment record
         $payment = Payment::create([
             'booking_id'     => $booking->id,
-            'gateway'        => $gateway,
+            'gateway'        => 'AzamPay ' . $providerName,
             'transaction_id' => $transactionId,
             'amount'         => $authoritativeAmount,
             'status'         => 'pending',
@@ -100,9 +137,12 @@ class PaymentController extends Controller
                 }
 
                 if ($token) {
-                    // Send MNO Sandbox Checkout Request to active endpoint
+                    if (empty($phoneNumber)) {
+                        return response()->json(['message' => 'Phone number is required for mobile money checkout.'], 422);
+                    }
+                    // Send MNO Checkout Request — no hardcoded fallback, real phone required
                     $mnoRes = Http::withoutVerifying()->withToken($token)->post('https://sandbox.azampay.co.tz/azampay/mno/checkout', [
-                        'accountNumber' => $phoneNumber ?? '255754000000',
+                        'accountNumber' => $phoneNumber,
                         'amount' => (string) round($authoritativeAmount),
                         'currency' => $currency,
                         'externalId' => $booking->booking_code,
