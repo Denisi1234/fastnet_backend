@@ -5,6 +5,7 @@ namespace App\Http\Controllers;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\Log;
+use App\Models\User;
 
 class PersonalDetailsController extends Controller
 {
@@ -13,26 +14,70 @@ class PersonalDetailsController extends Controller
      */
     public function getDetails(Request $request)
     {
-        $user = $request->user();
-        $userId = $user ? $user->id : ($request->input('user_id') ?? 'guest');
-        $cacheKey = "user_personal_details_{$userId}";
+        $user = $request->user('sanctum') ?? $request->user();
+        if (!$user && $request->filled('user_id')) {
+            $user = User::find($request->input('user_id'));
+        }
 
-        $defaultDetails = [
-            'first_name' => $user ? ($user->first_name ?? explode(' ', $user->name)[0]) : 'Deni_s',
-            'last_name' => $user ? ($user->last_name ?? (explode(' ', $user->name)[1] ?? 'Mahenge')) : 'Mahenge',
-            'full_name' => $user ? $user->name : 'Deni_s Mahenge',
-            'email' => $user ? $user->email : 'dm328432@gmail.com',
-            'phone_number' => $user ? ($user->phone_number ?? '+255 712 345 678') : '+255 712 345 678',
-            'is_verified' => true,
-            'avatar_url' => 'https://images.unsplash.com/photo-1531427186611-ecfd6d936c79?auto=format&fit=crop&w=200&q=80',
-        ];
+        if ($user) {
+            $nameParts = explode(' ', trim((string)$user->name), 2);
+            $firstName = $nameParts[0] ?? '';
+            $lastName = $nameParts[1] ?? '';
 
-        $details = Cache::get($cacheKey, $defaultDetails);
+            $details = [
+                'id' => $user->id,
+                'first_name' => $firstName,
+                'last_name' => $lastName,
+                'full_name' => $user->name,
+                'name' => $user->name,
+                'email' => $user->email,
+                'phone_number' => $user->phone_number ?? '',
+                'phone' => $user->phone_number ?? '',
+                'date_of_birth' => $user->date_of_birth ?? '',
+                'gender' => $user->gender ?? 'Not set',
+                'address' => $user->address ?? '',
+                'emergency_contact' => $user->emergency_contact ?? '',
+                'bio' => $user->bio ?? '',
+                'is_verified' => !empty($user->email_verified_at),
+                'avatar_url' => $user->profile_photo_url ?? '',
+                'avatar' => $user->profile_photo_url ?? '',
+                'role' => $user->role ?? 'traveler',
+            ];
+
+            return response()->json([
+                'status' => 'success',
+                'user_id' => $user->id,
+                'details' => $details,
+                'updated_at' => $user->updated_at ? $user->updated_at->toIso8601String() : now()->toIso8601String(),
+            ]);
+        }
+
+        // Guest / Unauthenticated session fallback
+        $cachedGuest = Cache::get('user_personal_details_guest', []);
+        $defaultDetails = array_merge([
+            'id' => null,
+            'first_name' => '',
+            'last_name' => '',
+            'full_name' => 'Traveler',
+            'name' => 'Traveler',
+            'email' => '',
+            'phone_number' => '',
+            'phone' => '',
+            'date_of_birth' => '',
+            'gender' => 'Not set',
+            'address' => '',
+            'emergency_contact' => '',
+            'bio' => '',
+            'is_verified' => false,
+            'avatar_url' => '',
+            'avatar' => '',
+            'role' => 'traveler',
+        ], is_array($cachedGuest) ? $cachedGuest : []);
 
         return response()->json([
             'status' => 'success',
-            'user_id' => $userId,
-            'details' => $details,
+            'user_id' => null,
+            'details' => $defaultDetails,
             'updated_at' => now()->toIso8601String(),
         ]);
     }
@@ -46,45 +91,111 @@ class PersonalDetailsController extends Controller
             'first_name' => 'nullable|string|max:100',
             'last_name' => 'nullable|string|max:100',
             'full_name' => 'nullable|string|max:255',
+            'name' => 'nullable|string|max:255',
             'email' => 'nullable|email|max:255',
             'phone_number' => 'nullable|string|max:50',
+            'phone' => 'nullable|string|max:50',
+            'date_of_birth' => 'nullable|string|max:50',
+            'gender' => 'nullable|string|max:50',
+            'address' => 'nullable|string|max:255',
+            'emergency_contact' => 'nullable|string|max:100',
+            'bio' => 'nullable|string|max:1000',
+            'avatar' => 'nullable|string|max:255',
+            'avatar_bg' => 'nullable|string|max:50',
+            'avatar_color' => 'nullable|string|max:50',
         ]);
 
-        $user = $request->user();
-        $userId = $user ? $user->id : ($request->input('user_id') ?? 'guest');
-        $cacheKey = "user_personal_details_{$userId}";
-
-        $firstName = $request->input('first_name', 'Deni_s');
-        $lastName = $request->input('last_name', 'Mahenge');
-        $fullName = $request->input('full_name', "{$firstName} {$lastName}");
-        $email = $request->input('email', 'dm328432@gmail.com');
-
-        $updated = [
-            'first_name' => $firstName,
-            'last_name' => $lastName,
-            'full_name' => $fullName,
-            'email' => $email,
-            'phone_number' => $request->input('phone_number', '+255 712 345 678'),
-            'is_verified' => true,
-            'avatar_url' => 'https://images.unsplash.com/photo-1531427186611-ecfd6d936c79?auto=format&fit=crop&w=200&q=80',
-        ];
-
-        if ($user) {
-            $user->name = $fullName;
-            $user->email = $email;
-            if (isset($user->first_name)) $user->first_name = $firstName;
-            if (isset($user->last_name)) $user->last_name = $lastName;
-            $user->save();
+        $user = $request->user('sanctum') ?? $request->user();
+        if (!$user && $request->filled('user_id')) {
+            $user = User::find($request->input('user_id'));
         }
 
-        Cache::put($cacheKey, $updated, now()->addDays(365));
+        $firstName = trim((string)$request->input('first_name', ''));
+        $lastName = trim((string)$request->input('last_name', ''));
+        $fullName = trim((string)($request->input('full_name') ?? $request->input('name') ?? ''));
 
-        Log::info("Personal details updated for user {$userId}:", $updated);
+        if ($fullName === '' && ($firstName !== '' || $lastName !== '')) {
+            $fullName = trim("{$firstName} {$lastName}");
+        } elseif ($fullName !== '' && $firstName === '' && $lastName === '') {
+            $parts = explode(' ', $fullName, 2);
+            $firstName = $parts[0] ?? '';
+            $lastName = $parts[1] ?? '';
+        }
+
+        $email = trim((string)$request->input('email', ''));
+        $phone = trim((string)($request->input('phone_number') ?? $request->input('phone') ?? ''));
+        $dob = trim((string)$request->input('date_of_birth', ''));
+        $gender = trim((string)$request->input('gender', ''));
+        $address = trim((string)$request->input('address', ''));
+        $emergency = trim((string)$request->input('emergency_contact', ''));
+        $bio = trim((string)$request->input('bio', ''));
+
+        if ($user) {
+            if ($fullName !== '') $user->name = $fullName;
+            if ($email !== '') $user->email = $email;
+            if ($phone !== '') $user->phone_number = $phone;
+            if ($dob !== '') $user->date_of_birth = $dob;
+            if ($gender !== '') $user->gender = $gender;
+            if ($address !== '') $user->address = $address;
+            if ($emergency !== '') $user->emergency_contact = $emergency;
+            if ($bio !== '') $user->bio = $bio;
+            $user->save();
+
+            $nameParts = explode(' ', trim((string)$user->name), 2);
+            $updated = [
+                'id' => $user->id,
+                'first_name' => $nameParts[0] ?? '',
+                'last_name' => $nameParts[1] ?? '',
+                'full_name' => $user->name,
+                'name' => $user->name,
+                'email' => $user->email,
+                'phone_number' => $user->phone_number ?? '',
+                'phone' => $user->phone_number ?? '',
+                'date_of_birth' => $user->date_of_birth ?? '',
+                'gender' => $user->gender ?? 'Not set',
+                'address' => $user->address ?? '',
+                'emergency_contact' => $user->emergency_contact ?? '',
+                'bio' => $user->bio ?? '',
+                'is_verified' => !empty($user->email_verified_at),
+                'avatar_url' => $user->profile_photo_url ?? '',
+                'avatar' => $user->profile_photo_url ?? '',
+                'role' => $user->role ?? 'traveler',
+            ];
+
+            Cache::put("user_personal_details_{$user->id}", $updated, now()->addDays(30));
+
+            return response()->json([
+                'status' => 'success',
+                'message' => 'Personal details updated successfully.',
+                'details' => $updated,
+                'updated_at' => $user->updated_at ? $user->updated_at->toIso8601String() : now()->toIso8601String(),
+            ]);
+        }
+
+        // Guest update
+        $guestData = array_filter([
+            'first_name' => $firstName,
+            'last_name' => $lastName,
+            'full_name' => $fullName ?: 'Traveler',
+            'name' => $fullName ?: 'Traveler',
+            'email' => $email,
+            'phone_number' => $phone,
+            'phone' => $phone,
+            'date_of_birth' => $dob,
+            'gender' => $gender ?: 'Not set',
+            'address' => $address,
+            'emergency_contact' => $emergency,
+            'bio' => $bio,
+            'is_verified' => false,
+            'role' => 'traveler',
+        ], fn($v) => $v !== '');
+
+        Cache::put('user_personal_details_guest', $guestData, now()->addDays(30));
 
         return response()->json([
             'status' => 'success',
             'message' => 'Personal details updated successfully.',
-            'details' => $updated,
+            'details' => $guestData,
             'updated_at' => now()->toIso8601String(),
         ]);
     }

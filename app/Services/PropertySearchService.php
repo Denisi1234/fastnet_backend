@@ -36,6 +36,16 @@ class PropertySearchService
         $lat              = $request->input('lat') ?? $request->input('latitude');
         $lng              = $request->input('lng') ?? $request->input('longitude');
         $radiusKm         = $request->input('radius_km', 25);
+        // Map viewport bounds "ne_lat,ne_lng,sw_lat,sw_lng" — exact-area filter.
+        // Never publicly cacheable: each viewport is unique.
+        $bounds = $request->input('bounds') ?? $request->input('bbox');
+        $bbox = null;
+        if (is_string($bounds) && $bounds !== '') {
+            $parts = array_map('trim', explode(',', $bounds));
+            if (count($parts) === 4 && count(array_filter($parts, 'is_numeric')) === 4) {
+                $bbox = array_map('floatval', $parts);
+            }
+        }
         $priceMin         = $request->input('price_min') ?? $request->input('min_price');
         $priceMax         = $request->input('price_max') ?? $request->input('max_price');
         $minRating        = $request->input('min_rating');
@@ -54,10 +64,34 @@ class PropertySearchService
 
         $propertyType = $request->input('property_type') ?? $request->input('type');
 
-        // Cache is applicable only for simple, no-date searches with default params
+        // Owner scope (?mine=1 or ?host_id=N): "My Properties" for the host portal.
+        // Never publicly cacheable; non-admins are forced to their own id.
+        // Bypasses the public-listing constraints (active status + rooms) so
+        // owners see pending/roomless properties too.
+        $mineParam = $request->input('mine') ?? $request->input('host_id');
+        $mineScope = false;
+        $mineHostId = 0;
+        if ($mineParam !== null && $mineParam !== '' && $mineParam !== '0' && strtolower((string)$mineParam) !== 'false') {
+            $authUser = $request->user('sanctum') ?? $request->user();
+            if ($mineParam === '1' || $mineParam === 1 || strtolower((string)$mineParam) === 'true' || strtolower((string)$mineParam) === 'mine') {
+                $mineHostId = (int)optional($authUser)->id;
+            } else {
+                $mineHostId = (int)$mineParam;
+            }
+            if ($authUser && $authUser->role !== 'admin') {
+                $mineHostId = (int)$authUser->id;
+            }
+            $mineScope = $mineHostId > 0;
+        }
+
+        // Cache is applicable only for simple, no-date searches with default params.
+        // area/amenities are NOT part of the cache key and must never be served
+        // a cached unfiltered list.
+        $hasAreaOrAmen = !empty($request->input('area')) || !empty($request->input('amenities'));
         $isCacheable = empty($priceMin) && empty($priceMax) && empty($minRating) && empty($freeCancellation)
             && empty($propertyType) && empty($sortBy) && !$isValidDateRange
-            && empty($lat) && $totalGuests <= 2 && $requiredRooms <= 1;
+            && empty($lat) && $totalGuests <= 2 && $requiredRooms <= 1
+            && !$mineScope && $bbox === null && !$hasAreaOrAmen;
 
         if ($isCacheable) {
             $cacheKey = $this->buildCacheKey($search, $city);
@@ -83,6 +117,7 @@ class PropertySearchService
         $query = Property::select([
             'id', 'name', 'city', 'area', 'address', 'price_per_night',
             'latitude', 'longitude', 'image_url', 'created_at', 'status',
+            'host_id',
         ])
         ->with([
             'rooms' => function ($q) {
@@ -93,11 +128,16 @@ class PropertySearchService
         ->withAvg('reviews', 'rating')
         ->withCount('reviews');
 
-        // Always filter to active properties with at least one room
-        $query->where(function ($q) {
-            $q->whereNull('status')->orWhereRaw('LOWER(status) = ?', ['active']);
-        });
-        $query->whereHas('rooms');
+        // Always filter to active properties with at least one room,
+        // except in owner scope (hosts must see all their own properties)
+        if ($mineScope) {
+            $query->where('host_id', $mineHostId);
+        } else {
+            $query->where(function ($q) {
+                $q->whereNull('status')->orWhereRaw('LOWER(status) = ?', ['active']);
+            });
+            $query->whereHas('rooms');
+        }
 
         // ─── Location / text search ──────────────────────────────────────────────────
         if (!empty($search)) {
@@ -130,8 +170,7 @@ class PropertySearchService
         }
 
         // ─── Geo-radius filter ───────────────────────────────────────────────────────
-        if (!empty($lat) && !empty($lng)) {
-            $query->whereNotNull('latitude')
+        if (!empty($lat) && !empty($lng)) {            $query->whereNotNull('latitude')
                   ->whereNotNull('longitude')
                   ->whereRaw("
                       (6371 * acos(
@@ -139,6 +178,16 @@ class PropertySearchService
                           sin(radians(?)) * sin(radians(latitude))
                       )) <= ?
                   ", [$lat, $lng, $lat, $radiusKm]);
+        }
+
+        // ─── Viewport bounds filter (exact area): ne_lat,ne_lng,sw_lat,sw_lng ──
+        // Applied together with (intersecting) any radius filter so the map
+        // viewport always wins — Arusha never leaks into a Dar view.
+        if (is_array($bbox)) {
+            [$neLat, $neLng, $swLat, $swLng] = $bbox;
+            $query->whereNotNull('latitude')->whereNotNull('longitude')
+                ->whereBetween('latitude', [min($swLat, $neLat), max($swLat, $neLat)])
+                ->whereBetween('longitude', [min($swLng, $neLng), max($swLng, $neLng)]);
         }
 
         // ─── Price filters ───────────────────────────────────────────────────────────
@@ -191,11 +240,10 @@ class PropertySearchService
         }
 
         // ─── Rating filter ───────────────────────────────────────────────────────────
+        // Review-less lodges pass (COALESCE), so new properties aren't zeroed out.
         if (!empty($minRating)) {
-            $query->whereHas('reviews', function ($rq) use ($minRating) {
-                $rq->selectRaw('AVG(rating) as avg_rating')
-                   ->havingRaw('AVG(rating) >= ?', [$minRating]);
-            })->orWhereDoesntHave('reviews');
+            $minRating = (float)$minRating;
+            $query->whereRaw('(SELECT COALESCE(AVG(rating), ?) FROM reviews WHERE reviews.property_id = properties.id) >= ?', [$minRating, $minRating]);
         }
 
         // ─── Sorting ─────────────────────────────────────────────────────────────────

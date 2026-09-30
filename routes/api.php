@@ -58,8 +58,20 @@ Route::get('/map-config', function () {
     ]);
 });
 
-// Property reviews (GET is public)
+// Property reviews (GET & POST are public with optional sanctum auth)
 Route::get('/properties/{id}/reviews', [ReviewController::class, 'index']);
+Route::post('/properties/{id}/reviews', function (\Illuminate\Http\Request $request, $id) {
+    $request->merge(['property_id' => (int)$id]);
+    return app(ReviewController::class)->store($request);
+});
+Route::post('/reviews', [ReviewController::class, 'store']);
+
+// Wishlists (GET, POST, DELETE are public with optional sanctum auth)
+Route::get('/wishlist', [WishlistController::class, 'index']);
+Route::post('/wishlist', [WishlistController::class, 'store']);
+Route::delete('/wishlist/{property_id}', [WishlistController::class, 'destroy']);
+Route::get('/wishlist-lists', [\App\Http\Controllers\WishlistListController::class, 'index']);
+Route::post('/wishlist-lists', [\App\Http\Controllers\WishlistListController::class, 'store']);
 
 // Newsletter subscription (Public)
 Route::post('/subscribe', [NewsletterSubscriptionController::class, 'subscribe']);
@@ -73,6 +85,8 @@ Route::get('/bookings/calculate', [BookingController::class, 'calculate']);
 Route::get('/bookings/revalidate', [BookingController::class, 'revalidate']);
 Route::post('/bookings/revalidate', [BookingController::class, 'revalidate']);
 Route::post('/bookings/create', [BookingController::class, 'store']);
+Route::get('/bookings', [BookingController::class, 'index']);
+Route::delete('/bookings/{id}', [BookingController::class, 'cancel']);
 
 // AzamPay Payment gateway routes (Public)
 Route::post('/payments/checkout', [PaymentController::class, 'checkout']);
@@ -88,7 +102,11 @@ Route::middleware('auth:sanctum')->group(function () {
     Route::get('/me', [AuthController::class, 'me']);
     Route::patch('/profile', [AuthController::class, 'updateProfile']);
     Route::post('/profile/photo', [AuthController::class, 'uploadProfilePhoto']);
+    Route::post('/user/password', [AuthController::class, 'updatePassword']);
+    Route::delete('/user', [AuthController::class, 'deleteAccount']);
     Route::post('/logout', [AuthController::class, 'logout']);
+    // Host onboarding: customer upgrades to owner (real working join-us flow)
+    Route::post('/become-host', [AuthController::class, 'becomeHost']);
     
     // Booking routes
     Route::post('/bookings', [BookingController::class, 'store']);
@@ -100,9 +118,9 @@ Route::middleware('auth:sanctum')->group(function () {
     Route::patch('/properties/{id}', [PropertyController::class, 'update']);
     Route::post('/properties/{id}/generate-description', [PropertyController::class, 'generateDescription']);
     Route::post('/properties/{propertyId}/rooms', [PropertyController::class, 'storeRoom']);
-    
-    // Payment checkout initiation
-    Route::post('/payments/checkout', [PaymentController::class, 'checkout']);
+    // Room management for host portal (owner-scoped, admin sees all)
+    Route::get('/rooms', [PropertyController::class, 'indexRooms']);
+    Route::get('/rooms/{id}', [PropertyController::class, 'showRoom']);
 
     // Message routes
     Route::get('/messages/threads', [MessageController::class, 'threads']);
@@ -154,14 +172,6 @@ Route::middleware('auth:sanctum')->group(function () {
 
     // Cancel booking
     Route::delete('/bookings/{id}', [BookingController::class, 'cancel']);
-
-    // Reviews
-    Route::post('/reviews', [ReviewController::class, 'store']);
-
-    // Wishlist
-    Route::get('/wishlist', [WishlistController::class, 'index']);
-    Route::post('/wishlist', [WishlistController::class, 'store']);
-    Route::delete('/wishlist/{property_id}', [WishlistController::class, 'destroy']);
 
     // Finance & Payout Reports
     Route::get('/finance/overview', [\App\Http\Controllers\FinanceController::class, 'overview']);

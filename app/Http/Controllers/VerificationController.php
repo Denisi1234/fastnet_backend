@@ -8,6 +8,7 @@ use App\Models\OwnerVerification;
 use App\Models\LodgeDocument;
 use App\Models\VerificationRequest;
 use Illuminate\Http\Request;
+use Illuminate\Support\Facades\Cache;
 
 class VerificationController extends Controller
 {
@@ -209,6 +210,11 @@ class VerificationController extends Controller
 
         $property = Property::findOrFail($propertyId);
         $property->update(['status' => $request->status]);
+
+        // Bust caches so approval is visible immediately (detail + search)
+        Cache::increment('properties:search-version');
+        Cache::forget("property:detail:v2:{$property->id}");
+        \App\Jobs\InvalidatePropertyCache::dispatch($property->id, $property->city);
 
         // Audit Trail Entry
         VerificationRequest::create([

@@ -4,6 +4,7 @@ namespace App\Models;
 
 use Illuminate\Database\Eloquent\Factories\HasFactory;
 use Illuminate\Database\Eloquent\Model;
+use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\Storage;
 use Illuminate\Support\Str;
 
@@ -47,7 +48,52 @@ class Room extends Model
         'fee_note',
         'images',
         'primary_image_url',
+        'room_type',
     ];
+
+    public function getRoomTypeAttribute(): ?string
+    {
+        return $this->attributes['room_type_id'] ?? null;
+    }
+
+    public function getNameAttribute($value)
+    {
+        return Property::formatTitle($value);
+    }
+
+    public function getRoomNumberAttribute($value)
+    {
+        return Property::formatTitle($value);
+    }
+
+    public function getBedConfigurationAttribute($value)
+    {
+        $v = Property::formatTitle($value);
+        if ($v !== '' && !preg_match('/\b(bed|beds)\b/i', $v)) {
+            $v .= ' Bed';
+        }
+        return $v;
+    }
+
+    public function getFloorAttribute($value)
+    {
+        $v = trim((string)$value);
+        if (strtolower($v) === 'fround' || strtolower($v) === 'ground') {
+            return 'Ground Floor';
+        }
+        return Property::formatTitle($value);
+    }
+
+    public function getAmenitiesAttribute($value)
+    {
+        if (empty($value)) return [];
+        $items = is_string($value) ? json_decode($value, true) : $value;
+        if (!is_array($items) && is_string($value)) {
+            $items = array_filter(array_map('trim', explode(',', $value)));
+        }
+        if (!is_array($items)) return [];
+        return array_values(array_map(fn($item) => is_string($item) ? Property::formatTitle($item) : $item, $items));
+    }
 
     public function getCustomerPriceAttribute()
     {
@@ -97,10 +143,25 @@ class Room extends Model
         return $this->images[0]['url'] ?? null;
     }
 
+    public function getPhotosAttribute($value)
+    {
+        $photos = is_string($value) ? json_decode($value, true) : $value;
+        if (!is_array($photos)) {
+            return [];
+        }
+        return array_values(array_map(fn($p) => is_string($p) ? $this->toPublicImageUrl($p) : $p, $photos));
+    }
+
     private function toPublicImageUrl(string $path): string
     {
-        $apiBase = rtrim((string) env('APP_URL', 'http://127.0.0.1:8000'), '/');
+        $apiBase = rtrim((string) (config('app.url') ?: env('APP_URL', 'http://127.0.0.1:8000')), '/');
         $path = trim($path);
+
+        if (str_contains($path, '/storage/')) {
+            $storagePath = substr($path, strpos($path, '/storage/') + 9);
+            return $apiBase . '/storage/' . ltrim($storagePath, '/');
+        }
+
         if (filter_var($path, FILTER_VALIDATE_URL)) {
             return $path;
         }
@@ -131,6 +192,19 @@ class Room extends Model
     public function property()
     {
         return $this->belongsTo(Property::class);
+    }
+
+    /**
+     * Room count drives public listing eligibility — bust caches on delete.
+     */
+    protected static function booted(): void
+    {
+        static::deleting(function (Room $room): void {
+            Cache::increment('properties:search-version');
+            if ($room->property_id) {
+                Cache::forget("property:detail:v2:{$room->property_id}");
+            }
+        });
     }
 
     public function bookings()

@@ -317,7 +317,8 @@ class ResendMailService
 
         $ticketId = $ticket->id;
         $issue = htmlspecialchars($ticket->issue ?? 'Support Request');
-        $portalUrl = "http://127.0.0.1:5500/web/support/chat.html?ticket={$ticketId}";
+        $frontendBase = rtrim(env('FRONTEND_URL', env('APP_ENV') === 'production' ? 'https://fastnetstays.com' : 'http://127.0.0.1:5500/web'), '/');
+        $portalUrl = "{$frontendBase}/support/chat.html?ticket={$ticketId}";
 
         $subject = "Support Ticket #{$ticketId} Created: {$issue}";
 
@@ -405,7 +406,8 @@ class ResendMailService
 
         $ticketId = $ticket->id;
         $issue = htmlspecialchars($ticket->issue ?? 'Support Request');
-        $portalUrl = "http://127.0.0.1:5500/web/support/chat.html?ticket={$ticketId}";
+        $frontendBase = rtrim(env('FRONTEND_URL', env('APP_ENV') === 'production' ? 'https://fastnetstays.com' : 'http://127.0.0.1:5500/web'), '/');
+        $portalUrl = "{$frontendBase}/support/chat.html?ticket={$ticketId}";
 
         $subject = "[Resolved] Ticket #{$ticketId}: {$issue}";
 

@@ -10,19 +10,20 @@ class ReviewController extends Controller
 {
     public function index($propertyId)
     {
-        // Check if Review model/table exists, return empty if not
         try {
             $reviews = Review::with('user:id,name')
                 ->where('property_id', $propertyId)
                 ->orderBy('created_at', 'desc')
                 ->get()
                 ->map(function ($r) {
+                    $name = !empty($r->guest_name) ? $r->guest_name : ($r->user->name ?? 'Verified Guest');
                     return [
                         'id' => $r->id,
-                        'user_name' => $r->user->name ?? 'Guest',
-                        'rating' => $r->rating,
+                        'user_name' => $name,
+                        'guest_name' => $name,
+                        'rating' => (float)$r->rating,
                         'comment' => $r->comment,
-                        'created_at' => $r->created_at,
+                        'created_at' => $r->created_at ? $r->created_at->toIso8601String() : null,
                     ];
                 });
             return response()->json($reviews);
@@ -35,20 +36,46 @@ class ReviewController extends Controller
     {
         $request->validate([
             'property_id' => 'required|integer',
-            'rating' => 'required|integer|min:1|max:5',
-            'comment' => 'nullable|string|max:1000',
+            'rating' => 'required|numeric|min:1|max:5',
+            'comment' => 'nullable|string|max:2000',
+            'user_name' => 'nullable|string|max:100',
+            'guest_name' => 'nullable|string|max:100',
             'booking_id' => 'nullable|integer',
         ]);
         
         try {
+            $userId = Auth::id() ?? $request->user('sanctum')?->id;
+            $guestName = trim((string)($request->input('guest_name') ?? $request->input('user_name') ?? ''));
+            if (empty($guestName) && $userId) {
+                $u = \App\Models\User::find($userId);
+                $guestName = $u?->name;
+            }
+            if (empty($guestName)) {
+                $guestName = 'Verified Guest';
+            }
+
             $review = Review::create([
-                'user_id' => Auth::id(),
-                'property_id' => $request->property_id,
+                'user_id' => $userId,
+                'guest_name' => $guestName,
+                'property_id' => (int)$request->property_id,
                 'booking_id' => $request->booking_id,
-                'rating' => $request->rating,
+                'rating' => (int)round($request->rating),
                 'comment' => $request->comment,
             ]);
-            return response()->json($review, 201);
+
+            // Clear property detail cache so new rating and review counts reflect immediately
+            \Illuminate\Support\Facades\Cache::forget("property:detail:v2:{$request->property_id}");
+            \Illuminate\Support\Facades\Cache::forget("property:{$request->property_id}");
+
+            return response()->json([
+                'id' => $review->id,
+                'user_name' => $review->guest_name,
+                'guest_name' => $review->guest_name,
+                'rating' => $review->rating,
+                'comment' => $review->comment,
+                'created_at' => $review->created_at ? $review->created_at->toIso8601String() : null,
+                'message' => 'Review submitted successfully'
+            ], 201);
         } catch (\Exception $e) {
             return response()->json(['message' => 'Could not save review: ' . $e->getMessage()], 500);
         }

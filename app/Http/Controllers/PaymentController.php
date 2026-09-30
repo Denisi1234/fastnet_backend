@@ -107,57 +107,74 @@ class PaymentController extends Controller
         ]);
 
         // Attempt AzamPay Gateway Integration Call
+        $azampayEnv = env('AZAMPAY_ENV', 'sandbox');
         $azampayApp = env('AZAMPAY_APP_NAME', 'FastNetStays');
         $azampayClientId = env('AZAMPAY_CLIENT_ID');
         $azampaySecret = env('AZAMPAY_CLIENT_SECRET');
+        $azampayToken  = env('AZAMPAY_TOKEN');
 
-        $providerName = 'Mpesa';
-        if (str_contains(strtolower($gateway), 'tigo')) $providerName = 'Tigo';
-        else if (str_contains(strtolower($gateway), 'airtel')) $providerName = 'Airtel';
-        else if (str_contains(strtolower($gateway), 'halo')) $providerName = 'Halopesa';
-        else if (str_contains(strtolower($gateway), 'azam')) $providerName = 'AzamPesa';
+        $isProd = strtolower((string)$azampayEnv) === 'production' || strtolower((string)$azampayEnv) === 'prod';
+        // Correct sandbox auth URL — authenticator-sandbox subdomain returns 401; sandbox.azampay.co.tz/AppLink/GetToken is correct
+        $authUrl = $isProd ? 'https://authenticator.azampay.co.tz/Applink/GetToken' : 'https://sandbox.azampay.co.tz/AppLink/GetToken';
+        $mnoUrl  = $isProd ? 'https://checkout.azampay.co.tz/azampay/mno/checkout' : 'https://sandbox.azampay.co.tz/azampay/mno/checkout';
+        // $providerName was already correctly resolved from the request above — do NOT overwrite it here
 
-        $promptMessage = "Payment request of TSh " . number_format($authoritativeAmount) . " initiated via AzamPay ({$providerName}). Please check your phone for PIN prompt.";
+        // Format phone number to international Tanzanian format (255XXXXXXXXX)
+        $formattedPhone = preg_replace('/[^0-9]/', '', (string)$phoneNumber);
+        if (str_starts_with($formattedPhone, '0')) {
+            $formattedPhone = '255' . substr($formattedPhone, 1);
+        } else if (strlen($formattedPhone) === 9) {
+            $formattedPhone = '255' . $formattedPhone;
+        }
 
-        if ($azampayClientId && ($azampaySecret || env('AZAMPAY_TOKEN'))) {
+        $promptMessage = "Payment request of TSh " . number_format($authoritativeAmount) . " initiated via AzamPay ({$providerName}). Please check your phone ({$formattedPhone}) for PIN prompt.";
+
+        if ($azampayClientId || $azampayToken) {
             try {
-                $token = env('AZAMPAY_TOKEN');
+                $token = $azampayToken;
 
-                if (!$token && $azampaySecret) {
-                    // Request AzamPay Sandbox Bearer Token
-                    $authRes = Http::withoutVerifying()->post('https://authenticator-sandbox.azampay.co.tz/Applink/GetToken', [
-                        'appName' => $azampayApp,
-                        'clientId' => $azampayClientId,
+                if (!$token && $azampayClientId && $azampaySecret) {
+                    // Request Bearer Token from AzamPay Authenticator
+                    $authRes = Http::withoutVerifying()->timeout(10)->post($authUrl, [
+                        'appName'      => $azampayApp,
+                        'clientId'     => $azampayClientId,
                         'clientSecret' => $azampaySecret,
                     ]);
 
                     if ($authRes->successful() && isset($authRes['data']['accessToken'])) {
                         $token = $authRes['data']['accessToken'];
+                    } else {
+                        Log::warning('AzamPay Token Auth Failed', ['status' => $authRes->status(), 'body' => $authRes->body()]);
                     }
                 }
 
                 if ($token) {
-                    if (empty($phoneNumber)) {
+                    if (empty($formattedPhone)) {
                         return response()->json(['message' => 'Phone number is required for mobile money checkout.'], 422);
                     }
-                    // Send MNO Checkout Request — no hardcoded fallback, real phone required
-                    $mnoRes = Http::withoutVerifying()->withToken($token)->post('https://sandbox.azampay.co.tz/azampay/mno/checkout', [
-                        'accountNumber' => $phoneNumber,
-                        'amount' => (string) round($authoritativeAmount),
-                        'currency' => $currency,
-                        'externalId' => $booking->booking_code,
-                        'provider' => $providerName,
+                    // Send MNO Checkout Request to official AzamPay endpoint
+                    $mnoRes = Http::withoutVerifying()->withToken($token)->timeout(15)->post($mnoUrl, [
+                        'accountNumber' => $formattedPhone,
+                        'amount'        => (string) round($authoritativeAmount),
+                        'currency'      => $currency,
+                        'externalId'    => $booking->booking_code,
+                        'provider'      => $providerName,
                     ]);
+
                     Log::info('AzamPay MNO Checkout Dispatched', [
-                        'status' => $mnoRes->status(),
-                        'body' => $mnoRes->body(),
-                        'phone' => $phoneNumber,
+                        'status'   => $mnoRes->status(),
+                        'body'     => $mnoRes->body(),
+                        'phone'    => $formattedPhone,
                         'provider' => $providerName
                     ]);
+                } else {
+                    Log::warning('AzamPay SKIPPED: No valid access token could be acquired.');
                 }
             } catch (\Exception $e) {
-                Log::warning('AzamPay Sandbox API Gateway Connection Notice: ' . $e->getMessage());
+                Log::warning('AzamPay API Connection Exception: ' . $e->getMessage());
             }
+        } else {
+            Log::info('AzamPay notice: AZAMPAY_CLIENT_ID / AZAMPAY_TOKEN is not set in environment.');
         }
 
         return response()->json([

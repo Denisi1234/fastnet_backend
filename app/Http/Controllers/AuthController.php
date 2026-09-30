@@ -188,6 +188,41 @@ class AuthController extends Controller
         return response()->json($request->user());
     }
 
+    /**
+     * Upgrade an authenticated customer to host/owner (real working join-us flow).
+     * Admins/owners are idempotent. Customers become owner with Pending Verification status.
+     */
+    public function becomeHost(Request $request)
+    {
+        $user = $request->user();
+        if (in_array($user->role, ['owner', 'admin'], true)) {
+            return response()->json([
+                'message' => 'Already a host.',
+                'user' => $user,
+            ]);
+        }
+
+        $request->validate([
+            'phone_number' => 'nullable|string|max:50',
+            'business_name' => 'nullable|string|max:255',
+        ]);
+
+        $updates = ['role' => 'owner', 'status' => 'Pending Verification'];
+        if ($request->filled('phone_number')) {
+            $updates['phone_number'] = trim((string)$request->input('phone_number'));
+        }
+        // business_name is kept for future owner profile; store in bio if bio empty
+        if ($request->filled('business_name') && empty($user->bio)) {
+            $updates['bio'] = trim((string)$request->input('business_name'));
+        }
+        $user->update($updates);
+
+        return response()->json([
+            'message' => 'Upgraded to host. You can now list your property.',
+            'user' => $user->fresh(),
+        ]);
+    }
+
     public function logout(Request $request)
     {
         $request->user()->currentAccessToken()->delete();
@@ -244,5 +279,30 @@ class AuthController extends Controller
         }
 
         return response()->json(['error' => 'No file uploaded'], 400);
+    }
+
+    public function updatePassword(Request $request)
+    {
+        $request->validate([
+            'current_password' => 'required|string',
+            'new_password' => 'required|string|min:8|confirmed',
+        ]);
+        $user = $request->user();
+        if (!Hash::check($request->current_password, $user->password)) {
+            return response()->json(['message' => 'Current password is incorrect.'], 422);
+        }
+        $user->update(['password' => Hash::make($request->new_password)]);
+        // revoke other tokens
+        $user->tokens()->delete();
+        $token = $user->createToken('auth_token')->plainTextToken;
+        return response()->json(['message' => 'Password updated successfully.', 'access_token' => $token]);
+    }
+
+    public function deleteAccount(Request $request)
+    {
+        $user = $request->user();
+        $user->tokens()->delete();
+        $user->delete();
+        return response()->json(['message' => 'Account deleted successfully.']);
     }
 }

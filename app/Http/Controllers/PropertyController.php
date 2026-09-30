@@ -442,6 +442,54 @@ class PropertyController extends Controller
         return response()->json($property->rooms);
     }
 
+    /**
+     * List rooms scoped to authenticated user (owner sees own, admin sees all).
+     * Real working endpoint for web host portal /host/rooms.
+     */
+    public function indexRooms(Request $request)
+    {
+        $user = $request->user();
+        $query = Room::with(['property'])->orderBy('created_at', 'desc');
+        if ($user && $user->role !== 'admin') {
+            $propertyIds = Property::where('host_id', $user->id)->pluck('id')->toArray();
+            if (empty($propertyIds)) {
+                return response()->json([]);
+            }
+            $query->whereIn('property_id', $propertyIds);
+        }
+        if ($request->filled('property_id')) {
+            $query->where('property_id', $request->input('property_id'));
+        }
+        if ($request->filled('status')) {
+            $query->where('status', $request->input('status'));
+        }
+        if ($request->filled('search')) {
+            $s = trim($request->input('search'));
+            $query->where(function ($q) use ($s) {
+                $q->where('room_number', 'ILIKE', "%{$s}%")
+                  ->orWhere('room_type_id', 'ILIKE', "%{$s}%")
+                  ->orWhere('status', 'ILIKE', "%{$s}%");
+            });
+        }
+        return response()->json($query->get());
+    }
+
+    /**
+     * Show single room (owner/admin scoped).
+     */
+    public function showRoom(Request $request, $id)
+    {
+        $room = Room::with(['property'])->find($id);
+        if (!$room) {
+            return response()->json(['message' => 'Room not found'], 404);
+        }
+        $user = $request->user();
+        if ($user && $user->role !== 'admin' && (int)optional($room->property)->host_id !== (int)$user->id) {
+            return response()->json(['message' => 'Unauthorized to view this room.'], 403);
+        }
+        return response()->json($room);
+    }
+
     public function storeRoom(Request $request, $propertyId)
     {
         $property = Property::find($propertyId);
@@ -453,6 +501,19 @@ class PropertyController extends Controller
         $user = $request->user();
         if ($user->role !== 'admin' && $property->host_id !== $user->id) {
             return response()->json(['message' => 'Unauthorized to add rooms to this property.'], 403);
+        }
+
+        // Web portal sends room_type/type alias + customer_price; normalise to room_type_id/price
+        if (!$request->filled('room_type_id')) {
+            $alias = $request->input('room_type', $request->input('type', 'Standard'));
+            $request->merge(['room_type_id' => is_string($alias) ? $alias : 'Standard']);
+        }
+        if (!$request->filled('price') && $request->filled('customer_price')) {
+            $request->merge(['price' => $request->input('customer_price')]);
+        }
+        if (!$request->filled('capacity')) {
+            $cap = (int)$request->input('max_adults', 2);
+            $request->merge(['capacity' => max(1, $cap)]);
         }
 
         $request->validate([
@@ -531,11 +592,26 @@ class PropertyController extends Controller
             return response()->json(['message' => 'Unauthorized to update this room.'], 403);
         }
 
+        // Normalise web portal aliases: room_type/type -> room_type_id, customer_price -> price
+        if ($request->filled('room_type') && !$request->filled('room_type_id')) {
+            $request->merge(['room_type_id' => $request->input('room_type')]);
+        }
+        if ($request->filled('type') && !$request->filled('room_type_id')) {
+            $request->merge(['room_type_id' => $request->input('type')]);
+        }
+        if ($request->filled('customer_price') && !$request->filled('price')) {
+            $request->merge(['price' => $request->input('customer_price')]);
+        }
+
         $request->validate([
-            'room_number' => 'required|string|max:255',
-            'room_type_id' => 'required|string|max:255',
-            'price' => 'required|numeric|min:0',
-            'capacity' => 'required|integer|min:1',
+            'room_number' => 'sometimes|string|max:255',
+            'room_type_id' => 'sometimes|string|max:255',
+            'room_type' => 'sometimes|string|max:255',
+            'type' => 'sometimes|string|max:255',
+            'price' => 'sometimes|numeric|min:0',
+            'customer_price' => 'sometimes|numeric|min:0',
+            'capacity' => 'sometimes|integer|min:1',
+            'status' => 'sometimes|string|max:50',
             'amenities' => 'nullable|array',
             'photos' => 'nullable|array',
             'description' => 'nullable|string',
@@ -547,40 +623,41 @@ class PropertyController extends Controller
             'room_size' => 'nullable|string|max:255',
         ]);
 
-        if ($this->containsLegacyRoomAssetPath($request->input('photos') ?? [])) {
+        if ($request->filled('photos') && $this->containsLegacyRoomAssetPath((array)$request->input('photos'))) {
             return response()->json([
                 'message' => 'Room photos must be public storage URLs or public storage paths. Legacy assets/images paths are not room media.'
             ], 422);
         }
 
-        // Duplicate room check (excluding current room ID)
-        $duplicate = Room::where('property_id', $room->property_id)
-            ->where('id', '!=', $id)
-            ->whereRaw('LOWER(room_number) = ?', [strtolower(trim($request->room_number))])
-            ->first();
+        // Duplicate room check (excluding current room ID) — only when room_number changes
+        if ($request->filled('room_number')) {
+            $duplicate = Room::where('property_id', $room->property_id)
+                ->where('id', '!=', $id)
+                ->whereRaw('LOWER(room_number) = ?', [strtolower(trim((string)$request->room_number))])
+                ->first();
 
-        if ($duplicate) {
-            return response()->json([
-                'message' => "Room {$request->room_number} already exists in this property."
-            ], 422);
+            if ($duplicate) {
+                return response()->json([
+                    'message' => "Room {$request->room_number} already exists in this property."
+                ], 422);
+            }
         }
 
-        $room->update([
-            'room_number' => trim($request->room_number),
-            'room_type_id' => trim($request->room_type_id),
-            'price' => $request->price,
-            'capacity' => $request->capacity,
-            'status' => $request->status ?? $room->status,
-            'amenities' => $request->amenities ?? [],
-            'photos' => $request->photos ?? [],
-            'description' => $request->description,
-            'floor' => $request->floor,
-            'max_adults' => $request->max_adults ?? 1,
-            'max_children' => $request->max_children ?? 0,
-            'bed_configuration' => $request->bed_configuration,
-            'number_of_beds' => $request->number_of_beds ?? 1,
-            'room_size' => $request->room_size,
-        ]);
+        $updatable = ['room_number', 'room_type_id', 'price', 'capacity', 'status', 'amenities', 'photos', 'description', 'floor', 'max_adults', 'max_children', 'bed_configuration', 'number_of_beds', 'room_size'];
+        $payload = [];
+        foreach ($updatable as $field) {
+            if ($request->exists($field) && $request->input($field) !== null) {
+                $val = $request->input($field);
+                if (in_array($field, ['room_number', 'room_type_id'], true) && is_string($val)) {
+                    $val = trim($val);
+                }
+                $payload[$field] = $val;
+            }
+        }
+        if (empty($payload)) {
+            return response()->json($room->fresh());
+        }
+        $room->update($payload);
 
         Cache::increment('properties:search-version');
         Cache::forget("property:detail:v2:{$property->id}");
@@ -615,7 +692,10 @@ class PropertyController extends Controller
 
         // Authenticated user permission validation
         $user = $request->user();
-        if ($user->role !== 'admin' && $property->host_id !== $user->id) {
+        if (!$user) {
+            return response()->json(['message' => 'Unauthenticated.'], 401);
+        }
+        if ($user->role !== 'admin' && (int)$property->host_id !== (int)$user->id) {
             return response()->json(['message' => 'Unauthorized to delete this room.'], 403);
         }
 

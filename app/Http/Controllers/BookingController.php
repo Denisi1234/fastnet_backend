@@ -179,18 +179,29 @@ class BookingController extends Controller
 
     public function index(Request $request)
     {
-        $user = $request->user();
-        if ($user->role === 'owner') {
-            // Host gets bookings for their rooms
-            $bookings = Booking::whereHas('room.property', function ($query) use ($user) {
-                $query->where('host_id', $user->id);
-            })->with(['room.property', 'guest'])->get();
-        } else {
-            // Customer gets their bookings
-            $bookings = Booking::where('guest_id', $user->id)
-                ->with(['room.property'])
-                ->get();
+        $user = $request->user('sanctum') ?? $request->user();
+        $email = $request->query('email');
+        $bookingCode = $request->query('booking_code') ?? $request->query('code');
+
+        $query = Booking::with(['room.property', 'guest']);
+
+        if ($bookingCode) {
+            $query->where('booking_code', $bookingCode);
+        } elseif ($user) {
+            if ($user->role === 'owner') {
+                $query->whereHas('room.property', function ($q) use ($user) {
+                    $q->where('host_id', $user->id);
+                });
+            } else {
+                $query->where('guest_id', $user->id);
+            }
+        } elseif ($email) {
+            $query->whereHas('guest', function ($q) use ($email) {
+                $q->where('email', $email);
+            });
         }
+
+        $bookings = $query->latest()->get();
 
         return response()->json($bookings);
     }
@@ -263,14 +274,22 @@ class BookingController extends Controller
         ]);
     }
 
-    public function cancel($id)
+    public function cancel(Request $request, $id)
     {
-        $user = Auth::user();
+        $user = $request->user('sanctum') ?? $request->user();
+        $email = $request->input('email') ?? $request->query('email');
 
-        // Allow the booking owner or an admin to cancel
-        $query = Booking::where('id', $id);
-        if ($user->role !== 'admin') {
+        $query = Booking::where(function($q) use ($id) {
+            if (is_numeric($id)) $q->where('id', (int)$id)->orWhere('booking_code', $id);
+            else $q->where('booking_code', $id);
+        });
+
+        if ($user && $user->role !== 'admin') {
             $query->where('guest_id', $user->id);
+        } elseif (!$user && $email) {
+            $query->whereHas('guest', function ($q) use ($email) {
+                $q->where('email', $email);
+            });
         }
 
         $booking = $query->first();
@@ -279,7 +298,7 @@ class BookingController extends Controller
             return response()->json(['message' => 'Booking not found.'], 404);
         }
 
-        if (in_array($booking->status, ['Cancelled', 'Completed'])) {
+        if (in_array(strtolower((string)$booking->status), ['cancelled', 'completed'])) {
             return response()->json([
                 'message' => 'Booking cannot be cancelled as it is already ' . $booking->status . '.'
             ], 422);
@@ -287,7 +306,7 @@ class BookingController extends Controller
 
         $booking->update(['status' => 'Cancelled']);
 
-        return response()->json($booking);
+        return response()->json(['status' => 'success', 'message' => 'Booking cancelled successfully.', 'booking' => $booking]);
     }
 
     /**
