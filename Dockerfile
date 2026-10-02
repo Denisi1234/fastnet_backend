@@ -7,6 +7,7 @@ COPY --from=ghcr.io/mlocati/php-extension-installer /usr/bin/install-php-extensi
 # Step 2: Install PHP extensions (IPE handles all APK dev headers + cleanup automatically)
 RUN install-php-extensions \
     pdo_mysql \
+    pdo_pgsql \
     mbstring \
     gd \
     zip \
@@ -32,8 +33,12 @@ COPY --from=composer:2.8 /usr/bin/composer /usr/bin/composer
 WORKDIR /var/www/html
 COPY . .
 
-# Step 6: Install Laravel dependencies
-RUN composer install --no-dev --optimize-autoloader --no-interaction --no-scripts
+# Step 6: Install Laravel dependencies (prod only) and rebuild package
+# discovery from installed packages — never ship the repo's stale
+# bootstrap/cache (it references dev-only providers like Pail → 500s).
+RUN composer install --no-dev --optimize-autoloader --no-interaction --no-scripts \
+    && rm -f bootstrap/cache/services.php bootstrap/cache/packages.php \
+    && php artisan package:discover --ansi || true
 
 # Step 7: Copy config files from docker/ folder
 COPY docker/supervisord.conf /etc/supervisord.conf

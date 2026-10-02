@@ -59,6 +59,7 @@ class WelcomeUserMail extends Mailable
         $firstName = $fullName ? explode(' ', $fullName)[0] : 'there';
         if ($firstName === 'there' && !empty($this->user->email)) {
             $firstName = ucfirst(explode('@', $this->user->email)[0]);
+        $heroUrl = config('app.url') . '/images/welcome-hero.jpg';
         }
         $firstName   = htmlspecialchars($firstName);
         $currentYear = date('Y');
@@ -125,7 +126,7 @@ class WelcomeUserMail extends Mailable
 
   <!-- ════════════ 2. HERO IMAGE BLOCK (Bulletproof Background) ════════════ -->
   <tr>
-    <td background="https://potpocgevsyoxxopwtaq.supabase.co/storage/v1/object/public/email-assets/welcome-hero.jpg" 
+    <td background="{$heroUrl}" 
         bgcolor="#005580" 
         width="600" 
         height="280" 
@@ -133,7 +134,7 @@ class WelcomeUserMail extends Mailable
         style="background-position: center; background-size: cover; background-repeat: no-repeat;">
       <!--[if gte mso 9]>
       <v:rect xmlns:v="urn:schemas-microsoft-com:vml" fill="true" stroke="false" style="width:600px;height:280px;">
-        <v:fill type="frame" src="https://potpocgevsyoxxopwtaq.supabase.co/storage/v1/object/public/email-assets/welcome-hero.jpg" color="#005580" />
+        <v:fill type="frame" src="{$heroUrl}" color="#005580" />
         <v:textbox inset="0,0,0,0">
       <![endif]-->
       

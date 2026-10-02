@@ -301,10 +301,13 @@ class PropertySearchService
         ]);
 
         $t1        = microtime(true);
-        $paginator = $query->paginate($perPage, ['*'], 'page', $page);
+        // simplePaginate: no COUNT(*) over the filtered set (killer at millions
+        // of rows). Clients use null-safe totals.
+        $paginator = $query->simplePaginate($perPage, ['*'], 'page', $page);
 
         Log::info('PropertySearch: DB paginate done', [
-            'total'  => $paginator->total(),
+            'page'   => $paginator->currentPage(),
+            'count'  => $paginator->count(),
             'db_ms'  => round((microtime(true) - $t1) * 1000),
         ]);
 

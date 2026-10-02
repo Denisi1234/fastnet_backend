@@ -36,14 +36,12 @@ class InvalidatePropertyCache implements ShouldQueue
             if ($this->propertyId) {
                 Cache::forget("property:{$this->propertyId}");
                 Cache::forget("property:detail:{$this->propertyId}");
-                Log::info("Cache busted: property:{$this->propertyId}");
             }
 
             // 2. Invalidate the city-level listing cache
             if ($this->city) {
                 $cityKey = 'properties:city:' . strtolower($this->city);
                 Cache::forget($cityKey);
-                Log::info("Cache busted: {$cityKey}");
             }
 
             // 3. Always bust the hot deals / featured properties cache

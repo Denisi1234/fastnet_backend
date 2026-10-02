@@ -189,7 +189,7 @@ class VerificationController extends Controller
 
         return response()->json([
             'message' => 'Lodge verification request submitted successfully.',
-            'property' => $property->load(['documents', 'rooms']),
+            'property' => ['id' => $property->id, 'status' => $property->status],
         ]);
     }
 
@@ -211,10 +211,12 @@ class VerificationController extends Controller
         $property = Property::findOrFail($propertyId);
         $property->update(['status' => $request->status]);
 
-        // Bust caches so approval is visible immediately (detail + search)
+        // Bust caches so approval is visible immediately (detail + search).
+        // Heavy invalidation runs AFTER the response is sent, so the admin
+        // action returns in ~3 EU round trips instead of ~7+ log/cache writes.
         Cache::increment('properties:search-version');
         Cache::forget("property:detail:v2:{$property->id}");
-        \App\Jobs\InvalidatePropertyCache::dispatch($property->id, $property->city);
+        \App\Jobs\InvalidatePropertyCache::dispatch($property->id, $property->city)->afterResponse();
 
         // Audit Trail Entry
         VerificationRequest::create([
@@ -228,9 +230,12 @@ class VerificationController extends Controller
             'reviewed_at' => now(),
         ]);
 
+        // Slim response: callers (web optimistic UI, mobile) only need the
+        // outcome — the full documents/rooms/host eager load cost 3 extra
+        // cross-region DB round trips per approve/reject.
         return response()->json([
             'message' => "Lodge verification updated to {$request->status}.",
-            'property' => $property->load(['documents', 'rooms', 'host']),
+            'property' => ['id' => $property->id, 'status' => $property->status],
         ]);
     }
 

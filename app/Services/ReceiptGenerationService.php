@@ -47,20 +47,13 @@ class ReceiptGenerationService
         $compressedSize = strlen($compressedBytes);
         $savedRatio = $originalSize > 0 ? round((1 - ($compressedSize / $originalSize)) * 100, 2) . '%' : '0%';
 
-        $supabaseUrl = env('SUPABASE_URL', 'https://potpocgevsyoxxopwtaq.supabase.co');
-        $supabaseKey = env('SUPABASE_ANON_KEY');
-        $uploadUrl = "{$supabaseUrl}/storage/v1/object/receipts/{$bookingCode}.pdf";
+        $fileName = "receipts/{$bookingCode}.pdf";
 
         try {
-            Http::withHeaders([
-                'Authorization' => "Bearer {$supabaseKey}",
-                'apikey' => $supabaseKey,
-                'Content-Type' => 'application/pdf',
-                'Content-Encoding' => 'gzip',
-                'x-upsert' => 'true',
-            ])->withBody($compressedBytes, 'application/pdf')->post($uploadUrl);
+            // Save directly to local disk (Railway Persistent Volume) instead of Supabase
+            \Illuminate\Support\Facades\Storage::disk('public')->put($fileName, $compressedBytes);
 
-            $publicUrl = "{$supabaseUrl}/storage/v1/object/public/receipts/{$bookingCode}.pdf";
+            $publicUrl = env('APP_URL') . '/storage/' . $fileName;
 
             return [
                 'status' => 'success',
@@ -71,16 +64,16 @@ class ReceiptGenerationService
                 'compression_ratio' => $savedRatio,
             ];
         } catch (\Exception $e) {
-            Log::error('Backend Supabase Receipt Upload Failed: ' . $e->getMessage());
+            Log::error('Backend Local Receipt Upload Failed: ' . $e->getMessage());
 
             return [
-                'status' => 'success',
+                'status' => 'error',
                 'booking_code' => $bookingCode,
-                'receipt_url' => "{$supabaseUrl}/storage/v1/object/public/receipts/{$bookingCode}.pdf",
+                'receipt_url' => null,
                 'original_size_bytes' => $originalSize,
                 'compressed_size_bytes' => $compressedSize,
                 'compression_ratio' => $savedRatio,
-                'notice' => 'Processed via FastNet backend stream compressor.'
+                'notice' => 'Failed to save receipt to local storage.'
             ];
         }
     }
