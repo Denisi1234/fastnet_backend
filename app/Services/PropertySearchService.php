@@ -170,14 +170,20 @@ class PropertySearchService
         }
 
         // ─── Geo-radius filter ───────────────────────────────────────────────────────
-        if (!empty($lat) && !empty($lng)) {            $query->whereNotNull('latitude')
-                  ->whereNotNull('longitude')
-                  ->whereRaw("
-                      (6371 * acos(
-                          cos(radians(?)) * cos(radians(latitude)) * cos(radians(longitude) - radians(?)) +
-                          sin(radians(?)) * sin(radians(latitude))
-                      )) <= ?
-                  ", [$lat, $lng, $lat, $radiusKm]);
+        // acos() raises a domain error if its argument drifts outside [-1, 1]
+        // (routine for near-coincident points), which drops the whole query.
+        // Clamping also makes distance 0 for a property at the search origin.
+        if (!empty($lat) && !empty($lng)) {
+            $query->whereNotNull('latitude')
+                ->whereNotNull('longitude')
+                ->whereRaw('
+                    (6371 * acos(
+                        LEAST(1, GREATEST(-1,
+                            cos(radians(?)) * cos(radians(latitude)) * cos(radians(longitude) - radians(?)) +
+                            sin(radians(?)) * sin(radians(latitude))
+                        ))
+                    )) <= ?
+                ', [$lat, $lng, $lat, $radiusKm]);
         }
 
         // ─── Viewport bounds filter (exact area): ne_lat,ne_lng,sw_lat,sw_lng ──
@@ -276,12 +282,14 @@ class PropertySearchService
         } elseif ($sortBy === 'newest') {
             $query->orderBy('created_at', 'desc');
         } elseif ($sortBy === 'distance' && !empty($lat) && !empty($lng)) {
-            $query->orderByRaw("
+            $query->orderByRaw('
                 (6371 * acos(
-                    cos(radians(?)) * cos(radians(latitude)) * cos(radians(longitude) - radians(?)) +
-                    sin(radians(?)) * sin(radians(latitude))
+                    LEAST(1, GREATEST(-1,
+                        cos(radians(?)) * cos(radians(latitude)) * cos(radians(longitude) - radians(?)) +
+                        sin(radians(?)) * sin(radians(latitude))
+                    ))
                 )) ASC
-            ", [$lat, $lng, $lat]);
+            ', [$lat, $lng, $lat]);
         } else {
             $query->orderBy('reviews_avg_rating', 'desc')->orderBy('id', 'asc');
         }
@@ -326,7 +334,7 @@ class PropertySearchService
                 foreach ($property->rooms as $room) {
                     $roomCap    = (int) ($room->capacity ?? 2);
                     $maxAdults  = (int) ($room->max_adults ?? $roomCap);
-                    $roomInv    = max(1, (int) ($room->total_inventory ?? 1));
+                    $roomInv    = $room->total_inventory === null ? 1 : max(0, (int) $room->total_inventory);
 
                     $singleRoomCapacityOk = ($roomCap >= $totalGuests) || ($maxAdults >= $adults);
 
@@ -415,11 +423,27 @@ class PropertySearchService
         ];
     }
 
+    public const SEARCH_VERSION_KEY = 'properties:search-version';
+
+    /**
+     * Bump the search cache generation.
+     *
+     * Cache::increment() is a silent no-op when the key does not yet exist, so
+     * the key has to be seeded first - otherwise the version stays pinned at 1
+     * forever and stale search cards survive the full TTL.
+     */
+    public static function bumpSearchVersion(): int
+    {
+        Cache::add(self::SEARCH_VERSION_KEY, 1, now()->addYear());
+
+        return (int) Cache::increment(self::SEARCH_VERSION_KEY);
+    }
+
     protected function buildCacheKey(?string $search, ?string $city): string
     {
         // Room-media updates bump this version, preventing stale serialized
         // search cards from serving a previous primary image.
-        $version = (int) Cache::get('properties:search-version', 1);
+        $version = (int) Cache::get(self::SEARCH_VERSION_KEY, 1);
         if (!empty($search)) {
             $normalized = strtolower(trim($search));
             $normalized = str_replace(['tanzania', ','], '', $normalized);

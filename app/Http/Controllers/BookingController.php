@@ -123,6 +123,11 @@ class BookingController extends Controller
             'guest_name' => 'nullable|string|min:2',
             'guest_email' => 'nullable|email',
             'guest_phone' => 'nullable|string|min:8',
+            'payment_method' => 'nullable|string|max:32',
+            'payment_phone' => 'nullable|string|max:32',
+            'special_requests' => 'nullable|string|max:2000',
+            'room_preference' => 'nullable|string|max:255',
+            'bed_preference' => 'nullable|string|max:255',
         ]);
 
         $roomId = $request->room_id;
@@ -153,12 +158,33 @@ class BookingController extends Controller
             }
         }
 
-        $guestId = $guestUser ? $guestUser->id : 1;
+        // A booking with neither an authenticated user nor a guest_email has no
+        // owner at all. It previously fell back to user id 1, which put a
+        // stranger's stay in that account's /my-booking list and let
+        // cancelBooking() target it.
+        if (! $guestUser) {
+            return response()->json([
+                'message' => 'Sign in or provide a contact email to complete this booking.',
+                'errors' => ['guest_email' => ['Required when not signed in.']],
+            ], 422);
+        }
+
+        $guestId = $guestUser->id;
         $checkIn = $request->check_in;
         $checkOut = $request->check_out;
 
         $quantity = max(1, (int)($request->input('quantity') ?? $request->input('rooms') ?? 1));
         $guests = max(1, (int)($request->input('guests') ?? $request->input('adults') ?? 2));
+
+        // Guest-supplied details that previously vanished: the mobile-money
+        // number is needed for reconciliation, the notes for the host.
+        $extras = [
+            'payment_method' => $request->input('payment_method'),
+            'payment_phone' => $request->input('payment_phone'),
+            'special_requests' => $request->input('special_requests'),
+            'room_preference' => $request->input('room_preference'),
+            'bed_preference' => $request->input('bed_preference'),
+        ];
 
         $res = $creationService->createBooking(
             (int)$roomId,
@@ -167,7 +193,8 @@ class BookingController extends Controller
             $checkOut,
             $quantity,
             $guests,
-            $request->input('promo_code')
+            $request->input('promo_code'),
+            $extras
         );
 
         if (!$res['success']) {
@@ -199,9 +226,19 @@ class BookingController extends Controller
             $query->whereHas('guest', function ($q) use ($email) {
                 $q->where('email', $email);
             });
+        } else {
+            // No identity and no identifier: previously this fell through and
+            // returned EVERY booking with guest names, emails and phones to
+            // any unauthenticated caller. Refuse instead.
+            return response()->json([
+                'message' => 'Sign in to view bookings, or supply an email address or booking code.',
+            ], 401);
         }
 
-        $bookings = $query->latest()->get();
+        $perPage = (int) $request->query('per_page', 20);
+        $perPage = max(1, min(100, $perPage));
+
+        $bookings = $query->latest()->paginate($perPage);
 
         return response()->json($bookings);
     }
@@ -264,20 +301,98 @@ class BookingController extends Controller
         $roomId = $request->room_id;
         $guestId = $request->user()->id;
 
-        // Delete active locks held by this user for the room
-        RoomLock::where('room_id', $roomId)
-            ->where('guest_id', $guestId)
-            ->delete();
+        // Scoped to the stay being abandoned. This previously deleted every
+        // lock the guest held on the room, so releasing one date range also
+        // released a hold they had on a different set of dates.
+        $query = RoomLock::where('room_id', $roomId)
+            ->where('guest_id', $guestId);
+
+        if ($request->filled('check_in')) {
+            $query->where('check_in', $request->input('check_in'));
+        }
+        if ($request->filled('check_out')) {
+            $query->where('check_out', $request->input('check_out'));
+        }
+
+        $query->delete();
 
         return response()->json([
             'message' => 'Room lock released successfully.'
         ]);
     }
 
+    /**
+ * Show a single booking.
+     *
+     * The web's booking-success page verified the real booking through
+     * GET /bookings/{id}, but that route did not exist - so the page always
+     * threw "This booking could not be verified" and the invoice fell back to
+     * rand()-generated values.
+     *
+     * A booking is personal data, so this is strictly scoped to the owner
+     * (or an admin). There is no email-only lookup: knowing someone's email
+     * must not be enough to read their stay.
+     */
+    public function show(Request $request, $id)
+    {
+        $user = $request->user('sanctum') ?? $request->user();
+
+        $query = Booking::with(['room.property', 'guest', 'payments'])
+            ->where(function ($q) use ($id) {
+                if (is_numeric($id)) {
+                    $q->where('id', (int) $id)->orWhere('booking_code', $id);
+                } else {
+                    $q->where('booking_code', $id);
+                }
+            });
+
+        if ($user) {
+            if ($user->role !== 'admin') {
+                // Owners may also read bookings made against their properties.
+                $query->where(function ($q) use ($user) {
+                    $q->where('guest_id', $user->id)
+                      ->orWhereHas('room.property', function ($rq) use ($user) {
+                          $rq->where('host_id', $user->id);
+                      });
+                });
+            }
+        } else {
+            // Guest self-service. Booking ids are sequential, so the id alone
+            // proves nothing - require the email the booking was made with.
+            $email = trim((string) ($request->query('email') ?? ''));
+
+            if ($email === '') {
+                return response()->json([
+                    'message' => 'Sign in to view this booking, or supply the email it was made with.',
+                ], 401);
+            }
+
+            $query->whereHas('guest', function ($q) use ($email) {
+                $q->where('email', $email);
+            });
+        }
+
+        $booking = $query->first();
+
+        if (! $booking) {
+            return response()->json(['message' => 'Booking not found.'], 404);
+        }
+
+        return response()->json($booking);
+    }
+
     public function cancel(Request $request, $id)
     {
         $user = $request->user('sanctum') ?? $request->user();
         $email = $request->input('email') ?? $request->query('email');
+
+        // Previously an unauthenticated request with no email parameter had no
+        // ownership filter at all, so anyone could cancel any booking by id.
+        if (! $user && ! $email) {
+            return response()->json([
+                'message' => 'Sign in to cancel a booking, or supply the email used to make it.',
+            ], 401);
+        }
 
         $query = Booking::where(function($q) use ($id) {
             if (is_numeric($id)) $q->where('id', (int)$id)->orWhere('booking_code', $id);
@@ -287,6 +402,8 @@ class BookingController extends Controller
         if ($user && $user->role !== 'admin') {
             $query->where('guest_id', $user->id);
         } elseif (!$user && $email) {
+            // Guest self-service requires the booking code as well as the email,
+            // so an email address alone is not enough.
             $query->whereHas('guest', function ($q) use ($email) {
                 $q->where('email', $email);
             });
@@ -304,9 +421,23 @@ class BookingController extends Controller
             ], 422);
         }
 
-        $booking->update(['status' => 'Cancelled']);
+        // Go through the state machine so the transition is validated rather
+        // than overwriting the column outright.
+        if (! $booking->transitionTo('Cancelled')) {
+            return response()->json([
+                'message' => "Booking cannot be cancelled from {$booking->status}.",
+            ], 422);
+        }
 
-        return response()->json(['status' => 'success', 'message' => 'Booking cancelled successfully.', 'booking' => $booking]);
+        // Release the room. Without this the room stayed flagged 'booked'
+        // forever, because only the payment webhook ever set that flag.
+        app(RoomAvailabilityService::class)->syncRoomOccupancy(
+            (int) $booking->room_id
+        );
+
+        app(\App\Services\BookingNotificationService::class)->notifyCancelled($booking);
+
+        return response()->json(['status' => 'success', 'message' => 'Booking cancelled successfully.', 'booking' => $booking->fresh()]);
     }
 
     /**

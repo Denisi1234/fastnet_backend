@@ -282,6 +282,9 @@ class CurrencyController extends Controller
             'status' => 'success',
             'base_currency' => 'TZS',
             'currencies' => $currencyList,
+            // Lets the UI tell the guest the rates are approximate rather than
+            // presenting a hardcoded table as a live quote.
+            'rates_stale' => $rates === self::$fallbackUsdRates,
             'updated_at' => now()->toIso8601String()
         ]);
     }
@@ -298,7 +301,11 @@ class CurrencyController extends Controller
                 if ($res->ok()) {
                     $data = $res->json();
                     if (isset($data['rates']) && is_array($data['rates'])) {
-                        return array_merge(self::$fallbackUsdRates, $data['rates']);
+                        // Live rates win outright. Previously the hardcoded
+                        // fallback table was merged underneath, so any currency
+                        // missing from a partial live response silently kept a
+                        // months-old rate and the response looked healthy.
+                        return $data['rates'];
                     }
                 }
             } catch (\Exception $e) {

@@ -13,7 +13,14 @@ class NotificationPreferenceController extends Controller
      */
     public function getPreferences(Request $request)
     {
-        $userId = $request->user() ? $request->user()->id : ($request->input('user_id') ?? 'guest');
+        // Preferences are per-person. The bucket used to fall back to the
+        // literal 'guest', so every anonymous visitor shared one record and
+        // saw each other's choices.
+        $user = $request->user();
+        if (!$user) {
+            return response()->json(['message' => 'Authentication required.'], 401);
+        }
+        $userId = $user->id;
         $cacheKey = "user_email_preferences_{$userId}";
 
         $defaultPrefs = [
@@ -49,7 +56,14 @@ class NotificationPreferenceController extends Controller
             'account_legal_notices' => 'nullable|boolean',
         ]);
 
-        $userId = $request->user() ? $request->user()->id : ($request->input('user_id') ?? 'guest');
+        // Preferences are per-person. The bucket used to fall back to the
+        // literal 'guest', so every anonymous visitor shared one record and
+        // saw each other's choices.
+        $user = $request->user();
+        if (!$user) {
+            return response()->json(['message' => 'Authentication required.'], 401);
+        }
+        $userId = $user->id;
         $cacheKey = "user_email_preferences_{$userId}";
 
         $existing = Cache::get($cacheKey, [
@@ -75,13 +89,22 @@ class NotificationPreferenceController extends Controller
             $travel = false;
         }
 
+        // These two were hardcoded to true, which silently discarded whatever
+        // the user had chosen on every save.
+        $bookingUpdates = $request->has('booking_updates')
+            ? filter_var($request->input('booking_updates'), FILTER_VALIDATE_BOOLEAN)
+            : (bool)($existing['booking_updates'] ?? true);
+        $legalNotices = $request->has('account_legal_notices')
+            ? filter_var($request->input('account_legal_notices'), FILTER_VALIDATE_BOOLEAN)
+            : (bool)($existing['account_legal_notices'] ?? true);
+
         $updated = [
             'feedback_research' => $feedback,
             'price_alerts' => $price,
             'travel_tips_deals' => $travel,
             'unsubscribe_all' => $unsub,
-            'booking_updates' => true,
-            'account_legal_notices' => true,
+            'booking_updates' => $bookingUpdates,
+            'account_legal_notices' => $legalNotices,
         ];
 
         Cache::put($cacheKey, $updated, now()->addDays(365));

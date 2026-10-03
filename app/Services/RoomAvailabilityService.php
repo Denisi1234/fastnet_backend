@@ -7,11 +7,70 @@ use App\Models\Room;
 use App\Models\RoomLock;
 use Carbon\Carbon;
 use Carbon\CarbonPeriod;
+use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Log;
 use InvalidArgumentException;
 
 class RoomAvailabilityService
 {
+    /**
+     * Statuses that mean a human deliberately took the room out of service.
+     * syncRoomOccupancy() must never overwrite these with 'available'.
+     */
+    public const MAINTENANCE_STATUSES = ['maintenance', 'out_of_service', 'inactive', 'disabled'];
+
+    /**
+     * Statuses that mean a guest is committed to occupying the room tonight.
+     *
+     * Deliberately an allow-list, not a deny-list of cancelled/rejected: a new
+     * status must not silently start counting as occupancy. Unpaid bookings
+     * (Pending) and finished stays (Completed) do not occupy.
+     */
+    public const OCCUPYING_STATUSES = ['confirmed', 'checked in'];
+
+    /**
+     * Keep rooms.status honest as bookings come and go.
+     *
+     * rooms.status is a coarse "occupied right now" flag — real bookability is
+     * decided night-by-night in checkRoomAvailability() from overlapping bookings
+     * and locks, never from this column. It was previously only ever *set* to
+     * 'booked' on payment success and never released, so a room stayed flagged
+     * "booked" forever after its first stay.
+     *
+     * @return string The status written, or the untouched status if left alone.
+     */
+    public function syncRoomOccupancy(int $roomId, ?Room $roomModel = null): string
+    {
+        $room = $roomModel ?? Room::find($roomId);
+
+        if (!$room) {
+            return 'missing';
+        }
+
+        // Never clobber an admin's maintenance / out-of-service decision.
+        $current = strtolower((string) ($room->status ?? 'available'));
+        if (in_array($current, self::MAINTENANCE_STATUSES, true)) {
+            return (string) $room->status;
+        }
+
+        $today = Carbon::today();
+
+        $occupied = Booking::where('room_id', $roomId)
+            ->whereIn(DB::raw('LOWER(status)'), self::OCCUPYING_STATUSES)
+            ->whereDate('check_in', '<=', $today)
+            ->whereDate('check_out', '>', $today)
+            ->exists();
+
+        $target = $occupied ? 'booked' : 'available';
+
+        if ($current !== $target) {
+            $room->update(['status' => $target]);
+            Log::info("RoomAvailability: room #{$roomId} status {$current} -> {$target}.");
+        }
+
+        return $target;
+    }
+
     /**
      * Determine night-by-night availability for a given room or total inventory over a date range.
      *
@@ -65,8 +124,24 @@ class RoomAvailabilityService
             ];
         }
 
-        // Total inventory for this room record (defaults to total_inventory column or 1 unit)
-        $totalInventory = max(1, (int) ($room->total_inventory ?? 1));
+        // Total inventory for this room record.
+        //
+        // A NULL column means "not configured" and safely defaults to one unit.
+        // An explicit 0 is a deliberate zero-inventory room and must stay 0 -
+        // the previous max(1, ...) turned it back into a bookable room.
+        $totalInventory = $room->total_inventory === null
+            ? 1
+            : max(0, (int) $room->total_inventory);
+
+        if ($totalInventory === 0) {
+            return [
+                'is_available'            => false,
+                'requested_quantity'      => $requestedQuantity,
+                'min_available_inventory' => 0,
+                'unavailability_reason'   => 'This room has no units available.',
+                'nightly_breakdown'       => [],
+            ];
+        }
 
         // ─── PERFORMANCE FIX: 2 bulk queries instead of 2×N per-night queries ───────
         //

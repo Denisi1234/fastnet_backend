@@ -22,8 +22,34 @@ class AdminController extends Controller
             return response()->json(['message' => 'Unauthorized. Admin role required.'], 403);
         }
 
-        $users = User::orderBy('created_at', 'desc')->get();
-        return response()->json($users);
+        // The admin UI sends role, status, search, page and per_page. This
+        // previously ignored all of them and returned every user in the
+        // system unpaginated - so the "Owners" screen listed customers too,
+        // and the search box did nothing.
+        $query = User::query();
+
+        $role = trim((string) $request->input('role', ''));
+        if ($role !== '') {
+            $query->where('role', $role);
+        }
+
+        $status = trim((string) $request->input('status', ''));
+        if ($status !== '') {
+            $query->where('status', $status);
+        }
+
+        $search = trim((string) $request->input('search', ''));
+        if ($search !== '') {
+            $query->where(function ($q) use ($search) {
+                $q->where('name', 'ILIKE', "%{$search}%")
+                  ->orWhere('email', 'ILIKE', "%{$search}%")
+                  ->orWhere('phone_number', 'ILIKE', "%{$search}%");
+            });
+        }
+
+        $perPage = max(1, min(100, (int) $request->input('per_page', 15)));
+
+        return response()->json($query->orderBy('created_at', 'desc')->paginate($perPage));
     }
 
     /**
@@ -292,8 +318,44 @@ class AdminController extends Controller
 
         $owners = $query->paginate($perPage);
 
-        $items = collect($owners->items())->map(function ($owner) {
-            return $this->buildOwnerFinancialProfile($owner);
+        $aggregates = $this->ownerFinancialAggregates(
+            collect($owners->items())->map(fn ($owner) => $owner->id)->all()
+        );
+
+        $items = collect($owners->items())->map(function (User $owner) use ($aggregates) {
+            $aggregate = $aggregates[$owner->id] ?? [
+                'property_count'      => 0,
+                'total_bookings'      => 0,
+                'confirmed_bookings'  => 0,
+                'refunded_count'      => 0,
+                'gross_booking_value' => 0.0,
+                'platform_commission' => 0.0,
+                'owner_earnings'      => 0.0,
+                'pending_earnings'    => 0.0,
+                'paid_amount'         => 0.0,
+                'refunds_total'       => 0.0,
+                'last_transaction'    => null,
+            ];
+
+            return [
+                'owner_id'            => $owner->id,
+                'owner_name'          => $owner->name,
+                'owner_email'         => $owner->email,
+                'owner_phone'         => $owner->phone_number ?? 'N/A',
+                'account_status'      => $owner->status ?? 'Active',
+                'property_count'      => $aggregate['property_count'],
+                'total_bookings'      => $aggregate['total_bookings'],
+                'confirmed_bookings'  => $aggregate['confirmed_bookings'],
+                'refunded_count'      => $aggregate['refunded_count'],
+                'gross_booking_value' => round($aggregate['gross_booking_value'], 2),
+                'platform_commission' => round($aggregate['platform_commission'], 2),
+                'owner_earnings'      => round($aggregate['owner_earnings'], 2),
+                'pending_earnings'    => round($aggregate['pending_earnings'], 2),
+                'paid_amount'         => round($aggregate['paid_amount'], 2),
+                'outstanding_payout'  => round(max(0.0, $aggregate['owner_earnings'] - $aggregate['paid_amount']), 2),
+                'refunds_total'       => round($aggregate['refunds_total'], 2),
+                'last_transaction'    => $aggregate['last_transaction'],
+            ];
         });
 
         if (in_array($sortBy, ['gross_value', 'net_earnings', 'total_bookings'])) {
@@ -474,72 +536,108 @@ class AdminController extends Controller
     }
 
     /**
+     * Aggregate owner finance metrics for a whole page of owners at once.
+     *
+     * Two queries total (property counts + one grouped booking aggregate) instead
+     * of ~10 per owner, which previously cost ~150 queries for a 15-row page.
+     *
+     * @param  array<int>  $hostIds
+     * @return array<int, array<string, float|int|null>>
+     */
+    protected function ownerFinancialAggregates(array $hostIds): array
+    {
+        $hostIds = array_values(array_unique(array_map('intval', $hostIds)));
+
+        $aggregates = [];
+        foreach ($hostIds as $hostId) {
+            $aggregates[$hostId] = [
+                'property_count'      => 0,
+                'total_bookings'      => 0,
+                'confirmed_bookings'  => 0,
+                'refunded_count'      => 0,
+                'gross_booking_value' => 0.0,
+                'platform_commission' => 0.0,
+                'owner_earnings'      => 0.0,
+                'pending_earnings'    => 0.0,
+                'paid_amount'         => 0.0,
+                'refunds_total'       => 0.0,
+                'last_transaction'    => null,
+            ];
+        }
+
+        if (empty($hostIds)) {
+            return $aggregates;
+        }
+
+        $propertyCounts = DB::table('properties')
+            ->whereIn('host_id', $hostIds)
+            ->groupBy('host_id')
+            ->pluck(DB::raw('COUNT(*)'), 'host_id');
+
+        foreach ($propertyCounts as $hostId => $count) {
+            $aggregates[(int) $hostId]['property_count'] = (int) $count;
+        }
+
+        // Mirrors the PHP-side fallbacks: platform_fee defaults to 10% of the
+        // booking when unset, and owner_payout defaults to gross minus that fee.
+        $fee = "COALESCE(bookings.platform_fee, ROUND(COALESCE(bookings.total_price, 0) * COALESCE(bookings.commission_rate, 10.00) / 100, 2))";
+        $payout = "COALESCE(bookings.owner_payout, ROUND(COALESCE(bookings.total_price, 0) - {$fee}, 2))";
+        $eligible = "bookings.status IN ('Confirmed','Checked In','Completed') OR bookings.payment_status = 'paid'";
+
+        $rows = DB::table('bookings')
+            ->join('rooms', 'rooms.id', '=', 'bookings.room_id')
+            ->join('properties', 'properties.id', '=', 'rooms.property_id')
+            ->whereIn('properties.host_id', $hostIds)
+            ->groupBy('properties.host_id')
+            ->select([
+                'properties.host_id as host_id',
+                DB::raw('COUNT(*) as total_bookings'),
+                DB::raw("COUNT(*) FILTER (WHERE bookings.status IN ('Confirmed','Checked In','Completed')) as confirmed_bookings"),
+                DB::raw("COUNT(*) FILTER (WHERE bookings.payment_status = 'refunded') as refunded_count"),
+                DB::raw("COALESCE(SUM(bookings.total_price) FILTER (WHERE {$eligible}), 0) as gross_booking_value"),
+                DB::raw("COALESCE(SUM({$fee}) FILTER (WHERE {$eligible}), 0) as platform_commission"),
+                DB::raw("COALESCE(SUM({$payout}) FILTER (WHERE {$eligible}), 0) as owner_earnings"),
+                DB::raw("COALESCE(SUM(bookings.total_price) FILTER (WHERE bookings.status = 'Pending' AND bookings.payment_status <> 'paid'), 0) * 0.90 as pending_earnings"),
+                DB::raw("COALESCE(SUM({$payout}) FILTER (WHERE bookings.payment_status = 'paid' AND bookings.status IN ('Completed','Checked In')), 0) as paid_amount"),
+                DB::raw("COALESCE(SUM(bookings.total_price) FILTER (WHERE bookings.payment_status = 'refunded'), 0) as refunds_total"),
+                DB::raw('MAX(bookings.created_at) as last_transaction'),
+            ])
+            ->get();
+
+        foreach ($rows as $row) {
+            $hostId = (int) $row->host_id;
+            if (!isset($aggregates[$hostId])) {
+                continue;
+            }
+            $aggregates[$hostId] = [
+                'property_count'      => $aggregates[$hostId]['property_count'],
+                'total_bookings'      => (int) $row->total_bookings,
+                'confirmed_bookings'  => (int) $row->confirmed_bookings,
+                'refunded_count'      => (int) $row->refunded_count,
+                'gross_booking_value' => (float) $row->gross_booking_value,
+                'platform_commission' => (float) $row->platform_commission,
+                'owner_earnings'      => (float) $row->owner_earnings,
+                'pending_earnings'    => (float) $row->pending_earnings,
+                'paid_amount'         => (float) $row->paid_amount,
+                'refunds_total'       => (float) $row->refunds_total,
+                'last_transaction'    => $row->last_transaction
+                    ? (string) $row->last_transaction
+                    : null,
+            ];
+        }
+
+        return $aggregates;
+    }
+
+    /**
      * Helper to perform optimized SQL aggregations for owner finance.
      */
     protected function buildOwnerFinancialProfile(User $owner, bool $includeDetails = false): array
     {
         $properties = Property::where('host_id', $owner->id)->get();
-        $propertyIds = $properties->pluck('id')->toArray();
-        $roomIds = [];
-        if (!empty($propertyIds)) {
-            $roomIds = DB::table('rooms')->whereIn('property_id', $propertyIds)->pluck('id')->toArray();
-        }
+        $aggregate = $this->ownerFinancialAggregates([$owner->id])[$owner->id];
 
-        $bookingQuery = Booking::query();
-        if (empty($roomIds)) {
-            $bookingQuery->whereRaw('1 = 0');
-        } else {
-            $bookingQuery->whereIn('room_id', $roomIds);
-        }
-
-        $totalBookings = (clone $bookingQuery)->count();
-        $confirmedBookings = (clone $bookingQuery)->whereIn('status', ['Confirmed', 'Checked In', 'Completed'])->count();
-        $refundedCount = (clone $bookingQuery)->where('payment_status', 'refunded')->count();
-
-        // Eligible bookings for gross/net calculations
-        $eligibleBookings = (clone $bookingQuery)
-            ->where(function ($q) {
-                $q->whereIn('status', ['Confirmed', 'Checked In', 'Completed'])
-                  ->orWhere('payment_status', 'paid');
-            })
-            ->get();
-
-        $grossValue = 0.0;
-        $platformCommission = 0.0;
-        $ownerEarnings = 0.0;
-
-        foreach ($eligibleBookings as $b) {
-            $gross = (float) $b->total_price;
-            $rate = ($b->commission_rate !== null) ? (float) $b->commission_rate : 10.00;
-            $fee = ($b->platform_fee !== null) ? (float) $b->platform_fee : round($gross * ($rate / 100), 2);
-            $payout = ($b->owner_payout !== null) ? (float) $b->owner_payout : round($gross - $fee, 2);
-
-            $grossValue += $gross;
-            $platformCommission += $fee;
-            $ownerEarnings += $payout;
-        }
-
-        $pendingEarnings = (float) (clone $bookingQuery)
-            ->where('status', 'Pending')
-            ->where('payment_status', '!=', 'paid')
-            ->sum('total_price') * 0.90;
-
-        $paidAmount = (float) (clone $bookingQuery)
-            ->where('payment_status', 'paid')
-            ->whereIn('status', ['Completed', 'Checked In'])
-            ->get()
-            ->sum(function ($b) {
-                $gross = (float) $b->total_price;
-                $rate = ($b->commission_rate !== null) ? (float) $b->commission_rate : 10.00;
-                $fee = ($b->platform_fee !== null) ? (float) $b->platform_fee : round($gross * ($rate / 100), 2);
-                return round($gross - $fee, 2);
-            });
-
-        $outstandingPayout = max(0.0, $ownerEarnings - $paidAmount);
-        $refundsTotal = (float) (clone $bookingQuery)->where('payment_status', 'refunded')->sum('total_price');
-
-        $lastBooking = (clone $bookingQuery)->orderBy('created_at', 'desc')->first();
-        $lastTransactionDate = $lastBooking ? ($lastBooking->created_at ? $lastBooking->created_at->format('Y-m-d H:i:s') : null) : null;
+        $outstandingPayout = max(0.0, $aggregate['owner_earnings'] - $aggregate['paid_amount']);
 
         $result = [
             'owner_id'             => $owner->id,
@@ -547,18 +645,18 @@ class AdminController extends Controller
             'owner_email'          => $owner->email,
             'owner_phone'          => $owner->phone_number ?? 'N/A',
             'account_status'       => $owner->status ?? 'Active',
-            'property_count'       => count($properties),
-            'total_bookings'       => $totalBookings,
-            'confirmed_bookings'   => $confirmedBookings,
-            'refunded_count'       => $refundedCount,
-            'gross_booking_value'  => round($grossValue, 2),
-            'platform_commission'  => round($platformCommission, 2),
-            'owner_earnings'       => round($ownerEarnings, 2),
-            'pending_earnings'     => round($pendingEarnings, 2),
-            'paid_amount'          => round($paidAmount, 2),
+            'property_count'       => $aggregate['property_count'],
+            'total_bookings'       => $aggregate['total_bookings'],
+            'confirmed_bookings'   => $aggregate['confirmed_bookings'],
+            'refunded_count'       => $aggregate['refunded_count'],
+            'gross_booking_value'  => round($aggregate['gross_booking_value'], 2),
+            'platform_commission'  => round($aggregate['platform_commission'], 2),
+            'owner_earnings'       => round($aggregate['owner_earnings'], 2),
+            'pending_earnings'     => round($aggregate['pending_earnings'], 2),
+            'paid_amount'          => round($aggregate['paid_amount'], 2),
             'outstanding_payout'   => round($outstandingPayout, 2),
-            'refunds_total'        => round($refundsTotal, 2),
-            'last_transaction'     => $lastTransactionDate,
+            'refunds_total'        => round($aggregate['refunds_total'], 2),
+            'last_transaction'     => $aggregate['last_transaction'],
         ];
 
         if ($includeDetails) {
@@ -707,6 +805,13 @@ class AdminController extends Controller
                 'user_name'     => $booking->guest->name ?? 'Unknown',
                 'property_name' => optional($booking->room->property)->name ?? 'Unknown',
                 'room_number'   => $booking->room->room_number ?? $booking->room_id,
+                // Join keys for consumers that map bookings to rooms (e.g. the
+                // host calendar). The summary previously carried no ids, so a
+                // booked night could not be attributed to a room.
+                'room_id'       => $booking->room_id,
+                'property_id'   => optional($booking->room)->property_id,
+                'payment_status'=> $booking->payment_status,
+                'guest_email'   => $booking->guest->email ?? null,
                 'check_in'      => $booking->check_in,
                 'check_out'     => $booking->check_out,
                 'nights'        => $nights,
@@ -728,11 +833,32 @@ class AdminController extends Controller
         }
 
         $request->validate([
-            'status' => 'required|string|in:Pending,Confirmed,Checked In,Completed,Cancelled',
+            'status' => 'required|string|in:Pending,Pending Verification,Confirmed,Checked In,Completed,Cancelled',
         ]);
 
         $booking = Booking::findOrFail($id);
-        $booking->update(['status' => $request->status]);
+
+        if (!$booking->transitionTo($request->status)) {
+            return response()->json([
+                'message' => "Invalid status transition from {$booking->status} to {$request->status}.",
+                'current_status' => $booking->status,
+            ], 422);
+        }
+
+        // An admin completing or cancelling a stay is the other way a room has to
+        // be freed — this is currently the only path that can reach 'Completed'.
+        app(\App\Services\RoomAvailabilityService::class)
+            ->syncRoomOccupancy((int) $booking->room_id);
+
+        // Mirror the transition into the guest's in-app feed. Guarded on the
+        // requested status so an unrelated edit (e.g. Pending -> Confirmed by
+        // hand) does not fire the wrong message.
+        $notifier = app(\App\Services\BookingNotificationService::class);
+        if ($request->status === 'Completed') {
+            $notifier->notifyCompleted($booking);
+        } elseif ($request->status === 'Cancelled') {
+            $notifier->notifyCancelled($booking);
+        }
 
         return response()->json($booking);
     }

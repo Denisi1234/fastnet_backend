@@ -2,6 +2,7 @@
 
 namespace App\Models;
 
+use App\Services\PropertySearchService;
 use Illuminate\Database\Eloquent\Factories\HasFactory;
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Support\Facades\Cache;
@@ -169,8 +170,29 @@ class Property extends Model
      */
     protected static function booted(): void
     {
+        // Invalidate the search cache on every write, not just delete.
+        //
+        // This previously only hooked `deleting`, so creating or editing a
+        // property left the cached search page untouched. A freshly created
+        // lodge could stay invisible for the full 30-minute search TTL, and
+        // an empty database could keep serving "no stays found" well after
+        // properties had been added.
+        $invalidate = function (Property $property): void {
+            PropertySearchService::bumpSearchVersion();
+
+            if ($property->id) {
+                Cache::forget("property:detail:v2:{$property->id}");
+                Cache::forget("property:detail:{$property->id}");
+            }
+        };
+
+        static::created($invalidate);
+        static::updated($invalidate);
+        static::deleted($invalidate);
+
+        // A delete also needs the id, which the deleted event no longer carries.
         static::deleting(function (Property $property): void {
-            Cache::increment('properties:search-version');
+            PropertySearchService::bumpSearchVersion();
             Cache::forget("property:detail:v2:{$property->id}");
             Cache::forget("property:detail:{$property->id}");
         });

@@ -3,586 +3,221 @@
 namespace App\Services;
 
 use App\Models\User;
-use App\Mail\WelcomeUserMail;
 use Illuminate\Support\Facades\Log;
 
+/**
+ * Transactional email delivery via the Resend REST API.
+ *
+ * Bodies live in resources/views/emails/*.blade.php — this class only assembles
+ * the data and hands it to the transport.
+ *
+ * Two rules this service enforces:
+ *  1. Never send invented booking data. Every field is read from the record and
+ *     templates omit rows they have no value for.
+ *  2. Never lose a send silently. A missing API key, an unverified domain and a
+ *     transport error are all logged with enough detail to diagnose.
+ */
 class ResendMailService
 {
-    // ── Cached hero image so we don't re-download per request ─────────────────
-    private static ?array $cachedHero = null;
+    /**
+     * Role senders. Each is overridable via env, but deliberately NOT via
+     * MAIL_FROM_ADDRESS: that variable held a placeholder (hello@example.com)
+     * which overrode all five role senders and made every send fail.
+     */
+    private const SENDERS = [
+        'welcome'  => ['MAIL_FROM_WELCOME',  'welcome@fastnetstays.com',  'FastNetStays'],
+        'security' => ['MAIL_FROM_SECURITY', 'security@fastnetstays.com', 'FastNetStays Security'],
+        'bookings' => ['MAIL_FROM_BOOKINGS', 'bookings@fastnetstays.com', 'FastNetStays Reservations'],
+        'support'  => ['MAIL_FROM_SUPPORT',  'support@fastnetstays.com',  'FastNet Support'],
+        'careers'  => ['MAIL_FROM_CAREERS',  'careers@fastnetstays.com',  'FastNetStays Careers'],
+    ];
+
+    /** Last-resort sender that works on any Resend account (no domain needed). */
+    private const FALLBACK_SENDER = 'onboarding@resend.dev';
+
+    private static function frontendBase(): string
+    {
+        $default = env('APP_ENV') === 'production'
+            ? 'https://fastnetstays.com'
+            : 'http://127.0.0.1:8765';
+
+        return rtrim(env('FRONTEND_URL', $default), '/');
+    }
+
+    // ── Public API (signatures unchanged — existing callers keep working) ──────
 
     public static function sendWelcomeEmail(User $user): bool
     {
-        $apiKey      = env('RESEND_API_KEY', '');
-        $primaryFrom = env('MAIL_FROM_ADDRESS', 'welcome@fastnetstays.com');
-        $fromName    = env('MAIL_FROM_NAME', 'FastNetStays');
-        $toEmail     = $user->email ?? null;
-
-        if (!$toEmail || !filter_var($toEmail, FILTER_VALIDATE_EMAIL)) {
-            return false;
-        }
-
-        // ── 1. Build HTML from WelcomeUserMail ────────────────────────────────
-        $mailable   = new WelcomeUserMail($user);
-        $reflection = new \ReflectionMethod($mailable, 'renderHtmlContent');
-        $reflection->setAccessible(true);
-        $html = $reflection->invoke($mailable);
-
-        $subject = 'Welcome to FastNetStays.com — Your account is ready';
-
-        // ── 3. Send — try verified domain first, fallback to resend.dev ───────
-        $response = self::post($apiKey, "{$fromName} <{$primaryFrom}>", $toEmail, $subject, $html);
-
-        if (isset($response['statusCode']) && $response['statusCode'] === 403) {
-            Log::warning("Domain {$primaryFrom} not yet verified — using fallback sender.");
-            $response = self::post($apiKey, "{$fromName} <onboarding@resend.dev>", $toEmail, $subject, $html);
-        }
-
-        if (isset($response['id'])) {
-            Log::info("Welcome email sent to {$toEmail}. Resend ID: {$response['id']}");
-            return true;
-        }
-
-        Log::error("Resend error for {$toEmail}: " . json_encode($response));
-        return false;
+        return self::deliver('welcome', $user->email ?? null, 'emails.welcome', [
+            'userName'       => $user->name,
+            'email'          => $user->email,
+            'searchUrl'      => self::frontendBase() . '/',
+            'accountUrl'     => self::frontendBase() . '/settings',
+            'preferencesUrl' => self::frontendBase() . '/notifications',
+            'privacyUrl'     => self::frontendBase() . '/privacy-policy',
+        ], 'Welcome to FastNetStays.com — Your account is ready', 'welcome email');
     }
 
     public static function sendLoginAlertEmail(User $user): bool
     {
-        $apiKey      = env('RESEND_API_KEY', '');
-        $primaryFrom = env('MAIL_FROM_ADDRESS', 'security@fastnetstays.com');
-        $fromName    = env('MAIL_FROM_NAME', 'FastNetStays Security');
-        $toEmail     = $user->email ?? null;
-
-        if (!$toEmail || !filter_var($toEmail, FILTER_VALIDATE_EMAIL)) {
-            return false;
-        }
-
-        $mailable   = new \App\Mail\LoginAlertMail($user);
-        $reflection = new \ReflectionMethod($mailable, 'renderHtmlContent');
-        $reflection->setAccessible(true);
-        $html = $reflection->invoke($mailable);
-
-        $subject = 'Security Alert: New sign-in to your FastNetStays account';
-
-        $response = self::post($apiKey, "{$fromName} <{$primaryFrom}>", $toEmail, $subject, $html);
-
-        if (isset($response['statusCode']) && $response['statusCode'] === 403) {
-            $response = self::post($apiKey, "{$fromName} <onboarding@resend.dev>", $toEmail, $subject, $html);
-        }
-
-        if (isset($response['id'])) {
-            Log::info("Login alert email sent to {$toEmail}. Resend ID: {$response['id']}");
-            return true;
-        }
-
-        Log::error("Resend login alert error for {$toEmail}: " . json_encode($response));
-        return false;
+        return self::deliver('security', $user->email ?? null, 'emails.login-alert', [
+            'accountEmail' => $user->email,
+            'signedInAt'   => now()->format('d M Y, H:i'),
+        ], 'Security Alert: New sign-in to your FastNetStays account', 'login alert');
     }
 
     public static function sendOtpEmail(string $toEmail, string $otpCode, string $purpose = 'Password Reset'): bool
     {
-        $apiKey      = env('RESEND_API_KEY', '');
-        $primaryFrom = env('MAIL_FROM_ADDRESS', 'security@fastnetstays.com');
-        $fromName    = env('MAIL_FROM_NAME', 'FastNetStays');
-
-        if (!$toEmail || !filter_var($toEmail, FILTER_VALIDATE_EMAIL)) {
-            return false;
-        }
-
         $user = User::where('email', $toEmail)->first();
-        $customerName = $user ? $user->name : 'there';
 
-        $subject = "Your verification code: {$otpCode}";
+        // Lower-case verb so it reads correctly mid-sentence: "to reset your password".
+        $verb = strtolower($purpose);
 
-        $html = '
-        <!DOCTYPE html>
-        <html lang="en">
-        <head>
-            <meta charset="utf-8">
-            <meta name="viewport" content="width=device-width, initial-scale=1.0">
-            <title>Your verification code</title>
-        </head>
-        <body style="margin: 0; padding: 0; background-color: #f8fafc; font-family: -apple-system, BlinkMacSystemFont, \'Segoe UI\', Roboto, Helvetica, Arial, sans-serif; color: #1e293b; -webkit-font-smoothing: antialiased; line-height: 1.6;">
-            <table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0" style="background-color: #f8fafc; padding: 40px 16px;">
-                <tr>
-                    <td align="center">
-                        <table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0" style="max-width: 520px; background-color: #ffffff; border: 1px solid #e2e8f0; border-radius: 12px; padding: 40px 36px; text-align: left; box-shadow: 0 1px 3px rgba(0,0,0,0.03);">
-                            
-                            <!-- Official FastNetStays Logo -->
-                            <tr>
-                                <td style="padding-bottom: 28px; border-bottom: 1px solid #f1f5f9;">
-                                    <div style="font-size: 22px; font-weight: 800; font-family: -apple-system, BlinkMacSystemFont, \'Segoe UI\', Roboto, sans-serif; letter-spacing: -0.5px; line-height: 1;">
-                                        <span style="color: #002155;">FASTNET</span><span style="color: #febb02;">STAYS</span><span style="color: #006CE4; font-size: 17px; font-weight: 700;">.com</span>
-                                    </div>
-                                    <div style="margin-top: 6px; font-size: 0; line-height: 0;">
-                                        <span style="display: inline-block; width: 6px; height: 6px; border-radius: 50%; background-color: #ef4444; margin-right: 4px;"></span>
-                                        <span style="display: inline-block; width: 6px; height: 6px; border-radius: 50%; background-color: #f97316; margin-right: 4px;"></span>
-                                        <span style="display: inline-block; width: 6px; height: 6px; border-radius: 50%; background-color: #febb02; margin-right: 4px;"></span>
-                                        <span style="display: inline-block; width: 6px; height: 6px; border-radius: 50%; background-color: #10b981; margin-right: 4px;"></span>
-                                        <span style="display: inline-block; width: 6px; height: 6px; border-radius: 50%; background-color: #006CE4;"></span>
-                                    </div>
-                                </td>
-                            </tr>
-
-                            <!-- Email Body Content -->
-                            <tr>
-                                <td style="padding-top: 28px;">
-                                    <h1 style="margin: 0 0 20px 0; font-size: 20px; font-weight: 700; color: #0f172a;">Your verification code</h1>
-                                    
-                                    <p style="margin: 0 0 16px 0; font-size: 15px; color: #334155;">
-                                        Hi ' . htmlspecialchars($customerName) . ',
-                                    </p>
-
-                                    <p style="margin: 0 0 24px 0; font-size: 15px; color: #334155;">
-                                        We received a request to reset your Fastnet Stays account password.
-                                    </p>
-
-                                    <p style="margin: 0 0 12px 0; font-size: 14px; font-weight: 600; color: #64748b;">
-                                        Your verification code is:
-                                    </p>
-                                </td>
-                            </tr>
-
-                            <!-- 6-digit Code Display -->
-                            <tr>
-                                <td align="center" style="padding: 4px 0 28px 0;">
-                                    <div style="background-color: #f1f5f9; border-radius: 8px; padding: 16px 28px; display: inline-block; font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace; font-size: 32px; font-weight: 800; letter-spacing: 8px; color: #002155;">
-                                        ' . htmlspecialchars($otpCode) . '
-                                    </div>
-                                </td>
-                            </tr>
-
-                            <!-- Instructions & Security Notice -->
-                            <tr>
-                                <td>
-                                    <p style="margin: 0 0 16px 0; font-size: 14px; color: #475569;">
-                                        This code will expire in <strong>10 minutes</strong>. For your security, do not share this code with anyone.
-                                    </p>
-
-                                    <p style="margin: 0 0 32px 0; font-size: 14px; color: #64748b;">
-                                        If you didn\'t request this code, you can safely ignore this email.
-                                    </p>
-                                </td>
-                            </tr>
-
-                            <!-- Signoff Footer -->
-                            <tr>
-                                <td style="padding-top: 24px; border-top: 1px solid #f1f5f9;">
-                                    <div style="font-size: 14px; font-weight: 700; color: #002155; margin-bottom: 2px;">
-                                        Fastnet Stays
-                                    </div>
-                                    <div style="font-size: 13px; color: #64748b; font-style: italic;">
-                                        Your stay, simplified.
-                                    </div>
-                                </td>
-                            </tr>
-
-                        </table>
-                    </td>
-                </tr>
-            </table>
-        </body>
-        </html>
-        ';
-
-        $response = self::post($apiKey, "{$fromName} <{$primaryFrom}>", $toEmail, $subject, $html);
-
-        if (isset($response['statusCode']) && $response['statusCode'] === 403) {
-            $response = self::post($apiKey, "{$fromName} <onboarding@resend.dev>", $toEmail, $subject, $html);
-        }
-
-        if (isset($response['id'])) {
-            Log::info("OTP code sent to {$toEmail}. Resend ID: {$response['id']}");
-            return true;
-        }
-
-        Log::error("Resend OTP error for {$toEmail}: " . json_encode($response));
-        return false;
+        return self::deliver('security', $toEmail, 'emails.otp', [
+            'otpCode' => $otpCode,
+            // Null for a contact that has no account yet — the passwordless
+            // sign-in flow proves the address before creating the user. The
+            // template omits the greeting when this is null, so do not deref it.
+            'customerName' => $user?->name,
+            'purpose'      => $verb,
+        ], "Your verification code: {$otpCode}", 'OTP');
     }
 
     public static function sendBookingConfirmation($guest, $booking, $property): bool
     {
-        $apiKey      = env('RESEND_API_KEY', '');
-        $primaryFrom = env('MAIL_FROM_ADDRESS', 'bookings@fastnetstays.com');
-        $fromName    = env('MAIL_FROM_NAME', 'FastNetStays Reservations');
-        $toEmail     = $guest->email ?? null;
-
-        if (!$toEmail || !filter_var($toEmail, FILTER_VALIDATE_EMAIL)) {
-            return false;
-        }
-
-        $propertyName = $property->name ?? 'Sunrise Lodge';
-        $propertyAddress = $property->address ?? 'Tanzania';
         $bookingCode = $booking->booking_code ?? ('BK' . ($booking->id ?? ''));
-        $checkIn = $booking->check_in ?? 'Aug 25, 2026';
-        $checkOut = $booking->check_out ?? 'Aug 28, 2026';
-        $totalPrice = number_format((float) ($booking->total_price ?? 105000));
-        $guestName = $guest->name ?? 'Valued Guest';
 
-        $subject = "Booking Confirmed: {$propertyName} (#{$bookingCode})";
-
-        $frontendBase = rtrim(env('FRONTEND_URL', env('APP_ENV') === 'production' ? 'https://fastnetstays.com' : 'http://127.0.0.1:5500/web'), '/');
-        $receiptDownloadUrl = "{$frontendBase}/booking/e-receipt.html?code={$bookingCode}&action=download";
-
-        $html = "<!DOCTYPE html>
-<html>
-<head>
-  <meta charset='utf-8'>
-  <style>
-    body { font-family: 'Helvetica Neue', Helvetica, Arial, sans-serif; background-color: #f8fafc; margin: 0; padding: 20px; color: #0f172a; }
-    .container { max-width: 600px; margin: 0 auto; background: #ffffff; border-radius: 12px; overflow: hidden; border: 1px solid #e2e8f0; }
-    .header { background: #003087; padding: 24px; text-align: center; }
-    .header h1 { color: #ffffff; margin: 0; font-size: 24px; font-weight: 800; }
-    .content { padding: 24px; }
-    .badge { display: inline-block; background: #ecfdf5; color: #059669; font-weight: 700; font-size: 12px; padding: 4px 12px; border-radius: 20px; border: 1px solid #a7f3d0; margin-bottom: 16px; }
-    .details-box { background: #f8fafc; border: 1px solid #e2e8f0; border-radius: 8px; padding: 16px; margin: 20px 0; }
-    .row { display: flex; justify-content: space-between; margin-bottom: 10px; font-size: 14px; }
-    .label { color: #64748b; font-weight: 600; }
-    .val { color: #0f172a; font-weight: 700; }
-    .btn { display: inline-block; background: #007fad; color: #ffffff !important; font-weight: 700; text-decoration: none; padding: 12px 24px; border-radius: 6px; text-align: center; margin-top: 16px; }
-    .footer { padding: 16px; text-align: center; font-size: 12px; color: #94a3b8; border-top: 1px solid #f1f5f9; }
-  </style>
-</head>
-<body>
-  <div class='container'>
-    <div class='header'>
-      <h1>FASTNET<span style='color: #ef4444;'>STAYS</span>.com</h1>
-    </div>
-    <div class='content'>
-      <div class='badge'>✓ BOOKING CONFIRMED & GUARANTEED</div>
-      <h2 style='margin-top: 0; font-size: 20px; color: #0f172a;'>Habari {$guestName}, your stay is locked in!</h2>
-      <p style='color: #475569; font-size: 14px; line-height: 1.5;'>
-        Thank you for booking with FastNet Stays. Your reservation at <strong>{$propertyName}</strong> has been confirmed. Below are your official booking details:
-      </p>
-      
-      <div class='details-box'>
-        <div class='row'>
-          <span class='label'>Booking Reference:</span>
-          <span class='val' style='color: #007fad;'>{$bookingCode}</span>
-        </div>
-        <div class='row'>
-          <span class='label'>Property:</span>
-          <span class='val'>{$propertyName}</span>
-        </div>
-        <div class='row'>
-          <span class='label'>Location:</span>
-          <span class='val'>{$propertyAddress}</span>
-        </div>
-        <div class='row'>
-          <span class='label'>Check-in:</span>
-          <span class='val'>{$checkIn} (14:00 - 20:30)</span>
-        </div>
-        <div class='row'>
-          <span class='label'>Check-out:</span>
-          <span class='val'>{$checkOut} (08:00 - 11:00)</span>
-        </div>
-        <div class='row'>
-          <span class='label'>Front Desk PIN:</span>
-          <span class='val' style='color: #059669;'>3947</span>
-        </div>
-        <div class='row' style='border-top: 1px solid #e2e8f0; padding-top: 10px; margin-top: 10px; font-size: 16px;'>
-          <span class='label' style='color: #0f172a;'>Total Amount:</span>
-          <span class='val' style='color: #007fad; font-size: 18px;'>TSh {$totalPrice}</span>
-        </div>
-      </div>
-
-      <div style='text-align: center;'>
-        <a href='{$receiptDownloadUrl}' class='btn'>Download Official PDF E-Receipt</a>
-      </div>
-    </div>
-    <div class='footer'>
-      © " . date('Y') . " FastNetStays.com. All rights reserved. • Customer Support: support@fastnetstays.com
-    </div>
-  </div>
-</body>
-</html>";
-
-        $response = self::post($apiKey, "{$fromName} <{$primaryFrom}>", $toEmail, $subject, $html);
-        return isset($response['id']);
+        return self::deliver('bookings', $guest->email ?? null, 'emails.booking-confirmed', [
+            'guestName'        => $guest->name ?? null,
+            'propertyName'     => $property->name ?? null,
+            'propertyAddress'  => $property->address ?? null,
+            'bookingCode'      => $bookingCode,
+            'checkIn'          => self::formatDate($booking->check_in ?? null),
+            'checkOut'         => self::formatDate($booking->check_out ?? null),
+            // Null, not a fabricated number: the old body defaulted to TSh 105,000.
+            'totalFormatted'   => isset($booking->total_price)
+                ? 'TSh ' . number_format((float) $booking->total_price)
+                : null,
+            'receiptUrl'       => self::frontendBase() . "/booking/e-receipt.html?code={$bookingCode}&action=download",
+            'bookingsUrl'      => self::frontendBase() . '/my-booking',
+        ], "Booking Confirmed: " . ($property->name ?? 'your stay') . " (#{$bookingCode})", 'booking confirmation');
     }
 
     public static function sendTicketConfirmationEmail($ticket, ?string $toEmail = null, ?string $userName = null): bool
     {
-        $apiKey      = env('RESEND_API_KEY', '');
-        $primaryFrom = env('MAIL_FROM_ADDRESS', 'support@fastnetstays.com');
-        $fromName    = env('MAIL_FROM_NAME', 'FastNet Support');
-        
         $email = $toEmail ?: ($ticket->user->email ?? null);
-        $name = $userName ?: ($ticket->user->name ?? 'Traveler');
+        $issue = $ticket->issue ?? null;
 
-        if (!$email || !filter_var($email, FILTER_VALIDATE_EMAIL)) {
-            return false;
-        }
-
-        $ticketId = $ticket->id;
-        $issue = htmlspecialchars($ticket->issue ?? 'Support Request');
-        $frontendBase = rtrim(env('FRONTEND_URL', env('APP_ENV') === 'production' ? 'https://fastnetstays.com' : 'http://127.0.0.1:5500/web'), '/');
-        $portalUrl = "{$frontendBase}/support/chat.html?ticket={$ticketId}";
-
-        $subject = "Support Ticket #{$ticketId} Created: {$issue}";
-
-        $html = "<!DOCTYPE html>
-<html>
-<head>
-<meta charset='utf-8'>
-<style>
-  body { font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; background-color: #f8fafc; margin: 0; padding: 20px; color: #0f172a; }
-  .card { max-width: 600px; margin: 0 auto; background: #ffffff; border-radius: 16px; border: 1px solid #e2e8f0; overflow: hidden; }
-  .header { background: #002155; padding: 28px 32px; text-align: center; }
-  .header h1 { color: #ffffff; margin: 0; font-size: 22px; font-weight: 800; letter-spacing: -0.5px; }
-  .header h1 span { color: #febb02; }
-  .content { padding: 32px; }
-  .badge { display: inline-block; background: #eff6ff; color: #0055d4; font-size: 11px; font-weight: 700; padding: 4px 10px; border-radius: 6px; text-transform: uppercase; margin-bottom: 16px; border: 1px solid #bfdbfe; }
-  .box { background: #f8fafc; border: 1px solid #e2e8f0; border-radius: 12px; padding: 20px; margin: 20px 0; font-size: 13.5px; }
-  .row { display: flex; justify-content: space-between; margin-bottom: 8px; }
-  .row:last-child { margin-bottom: 0; }
-  .label { color: #64748b; font-weight: 500; }
-  .val { color: #0f172a; font-weight: 600; text-align: right; }
-  .btn { display: inline-block; background: #0055d4; color: #ffffff !important; text-decoration: none; padding: 12px 28px; border-radius: 10px; font-weight: 600; font-size: 14px; margin-top: 10px; }
-  .footer { padding: 20px 32px; background: #f8fafc; border-top: 1px solid #f1f5f9; font-size: 11px; color: #94a3b8; text-align: center; }
-</style>
-</head>
-<body>
-  <div class='card'>
-    <div class='header'>
-      <h1>FASTNET<span>STAYS</span></h1>
-    </div>
-    <div class='content'>
-      <div class='badge'>Support Request Received</div>
-      <h2 style='margin: 0 0 12px 0; font-size: 18px; color: #0f172a;'>Habari {$name},</h2>
-      <p style='color: #475569; font-size: 14px; line-height: 1.6; margin: 0 0 16px 0;'>
-        We have received your support inquiry. A customer service concierge has been assigned to your case and is reviewing your request.
-      </p>
-
-      <div class='box'>
-        <div class='row'>
-          <span class='label'>Ticket Reference:</span>
-          <span class='val' style='color: #0055d4; font-family: monospace;'>#{$ticketId}</span>
-        </div>
-        <div class='row'>
-          <span class='label'>Topic / Subject:</span>
-          <span class='val'>{$issue}</span>
-        </div>
-        <div class='row'>
-          <span class='label'>Status:</span>
-          <span class='val' style='color: #d97706;'>Open & Active</span>
-        </div>
-      </div>
-
-      <div style='text-align: center; margin: 24px 0 12px 0;'>
-        <a href='{$portalUrl}' class='btn'>View Ticket & Live Chat</a>
-      </div>
-      <p style='text-align: center; font-size: 12px; color: #94a3b8; margin: 8px 0 0 0;'>
-        You can reply directly in your browser without logging in.
-      </p>
-    </div>
-    <div class='footer'>
-      © " . date('Y') . " FastNetStays.com • 24/7 Concierge & Support Desk
-    </div>
-  </div>
-</body>
-</html>";
-
-        $response = self::post($apiKey, "{$fromName} <{$primaryFrom}>", $email, $subject, $html);
-        if (isset($response['statusCode']) && $response['statusCode'] === 403) {
-            $response = self::post($apiKey, "{$fromName} <onboarding@resend.dev>", $email, $subject, $html);
-        }
-        return isset($response['id']);
+        return self::deliver('support', $email, 'emails.ticket-confirmation', [
+            'ticketId'  => $ticket->id,
+            'issue'     => $issue,
+            'status'    => $ticket->status ?? 'Open',
+            'userName'  => $userName ?: ($ticket->user->name ?? null),
+            'portalUrl' => self::frontendBase() . '/support/chat.html?ticket=' . $ticket->id,
+        ], "Support Ticket #{$ticket->id} Created" . ($issue ? ": {$issue}" : ''), 'ticket confirmation');
     }
 
     public static function sendTicketResolvedEmail($ticket, ?string $toEmail = null, ?string $userName = null): bool
     {
-        $apiKey      = env('RESEND_API_KEY', '');
-        $primaryFrom = env('MAIL_FROM_ADDRESS', 'support@fastnetstays.com');
-        $fromName    = env('MAIL_FROM_NAME', 'FastNet Support');
-        
         $email = $toEmail ?: ($ticket->user->email ?? null);
-        $name = $userName ?: ($ticket->user->name ?? 'Traveler');
+        $issue = $ticket->issue ?? null;
 
-        if (!$email || !filter_var($email, FILTER_VALIDATE_EMAIL)) {
-            return false;
-        }
-
-        $ticketId = $ticket->id;
-        $issue = htmlspecialchars($ticket->issue ?? 'Support Request');
-        $frontendBase = rtrim(env('FRONTEND_URL', env('APP_ENV') === 'production' ? 'https://fastnetstays.com' : 'http://127.0.0.1:5500/web'), '/');
-        $portalUrl = "{$frontendBase}/support/chat.html?ticket={$ticketId}";
-
-        $subject = "[Resolved] Ticket #{$ticketId}: {$issue}";
-
-        $html = "<!DOCTYPE html>
-<html>
-<head>
-<meta charset='utf-8'>
-<style>
-  body { font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; background-color: #f8fafc; margin: 0; padding: 20px; color: #0f172a; }
-  .card { max-width: 600px; margin: 0 auto; background: #ffffff; border-radius: 16px; border: 1px solid #e2e8f0; overflow: hidden; }
-  .header { background: #002155; padding: 28px 32px; text-align: center; }
-  .header h1 { color: #ffffff; margin: 0; font-size: 22px; font-weight: 800; letter-spacing: -0.5px; }
-  .header h1 span { color: #febb02; }
-  .content { padding: 32px; }
-  .badge { display: inline-block; background: #ecfdf5; color: #059669; font-size: 11px; font-weight: 700; padding: 4px 10px; border-radius: 6px; text-transform: uppercase; margin-bottom: 16px; border: 1px solid #a7f3d0; }
-  .box { background: #f8fafc; border: 1px solid #e2e8f0; border-radius: 12px; padding: 20px; margin: 20px 0; font-size: 13.5px; }
-  .row { display: flex; justify-content: space-between; margin-bottom: 8px; }
-  .row:last-child { margin-bottom: 0; }
-  .label { color: #64748b; font-weight: 500; }
-  .val { color: #0f172a; font-weight: 600; text-align: right; }
-  .btn { display: inline-block; background: #0055d4; color: #ffffff !important; text-decoration: none; padding: 12px 28px; border-radius: 10px; font-weight: 600; font-size: 14px; margin-top: 10px; }
-  .footer { padding: 20px 32px; background: #f8fafc; border-top: 1px solid #f1f5f9; font-size: 11px; color: #94a3b8; text-align: center; }
-</style>
-</head>
-<body>
-  <div class='card'>
-    <div class='header'>
-      <h1>FASTNET<span>STAYS</span></h1>
-    </div>
-    <div class='content'>
-      <div class='badge'>✓ Case Resolved</div>
-      <h2 style='margin: 0 0 12px 0; font-size: 18px; color: #0f172a;'>Habari {$name},</h2>
-      <p style='color: #475569; font-size: 14px; line-height: 1.6; margin: 0 0 16px 0;'>
-        Your customer support ticket <strong>#{$ticketId}</strong> has been marked as resolved by our customer care team.
-      </p>
-
-      <div class='box'>
-        <div class='row'>
-          <span class='label'>Ticket Reference:</span>
-          <span class='val' style='color: #0055d4; font-family: monospace;'>#{$ticketId}</span>
-        </div>
-        <div class='row'>
-          <span class='label'>Topic / Subject:</span>
-          <span class='val'>{$issue}</span>
-        </div>
-        <div class='row'>
-          <span class='label'>Status:</span>
-          <span class='val' style='color: #059669; font-weight: 700;'>Resolved</span>
-        </div>
-      </div>
-
-      <div style='text-align: center; margin: 24px 0 12px 0;'>
-        <a href='{$portalUrl}' class='btn'>View Resolution & Transcript</a>
-      </div>
-      <p style='text-align: center; font-size: 12px; color: #94a3b8; margin: 8px 0 0 0;'>
-        Need further assistance? You can reopen this case anytime by sending a reply.
-      </p>
-    </div>
-    <div class='footer'>
-      © " . date('Y') . " FastNetStays.com • 24/7 Concierge & Support Desk
-    </div>
-  </div>
-</body>
-</html>";
-
-        $response = self::post($apiKey, "{$fromName} <{$primaryFrom}>", $email, $subject, $html);
-        if (isset($response['statusCode']) && $response['statusCode'] === 403) {
-            $response = self::post($apiKey, "{$fromName} <onboarding@resend.dev>", $email, $subject, $html);
-        }
-        return isset($response['id']);
+        return self::deliver('support', $email, 'emails.ticket-resolved', [
+            'ticketId'  => $ticket->id,
+            'issue'     => $issue,
+            'status'    => $ticket->status ?? 'Resolved',
+            'userName'  => $userName ?: ($ticket->user->name ?? null),
+            'portalUrl' => self::frontendBase() . '/support/chat.html?ticket=' . $ticket->id,
+        ], "[Resolved] Ticket #{$ticket->id}" . ($issue ? ": {$issue}" : ''), 'ticket resolved');
     }
 
     public static function sendSubscriptionEmail(string $toEmail, string $type = 'general'): bool
     {
-        $apiKey      = env('RESEND_API_KEY', '');
-        $primaryFrom = env('MAIL_FROM_ADDRESS', 'careers@fastnetstays.com');
-        $fromName    = env('MAIL_FROM_NAME', 'FastNetStays Careers');
+        $careers = $type === 'careers';
 
-        if (!$toEmail || !filter_var($toEmail, FILTER_VALIDATE_EMAIL)) {
-            return false;
-        }
-
-        $subject = ($type === 'careers')
-            ? 'You are subscribed to Fastnetstays.com Career & Job Alerts'
-            : 'Welcome to FastNetStays Updates & News';
-
-        $headline = ($type === 'careers')
-            ? 'Career & Job Alerts Subscription'
-            : 'Newsletter Subscription Confirmed';
-
-        $description = ($type === 'careers')
-            ? 'Thank you for subscribing to Fastnetstays.com Career Alerts. You will be the first to receive notifications the moment our careers portal launches and positions open across Tanzania.'
-            : 'Thank you for subscribing to FastNetStays. You will receive the latest updates, hotel deals, and travel stories directly to your inbox.';
-
-        $html = '<!DOCTYPE html>
-        <html lang="en">
-        <head>
-            <meta charset="utf-8">
-            <meta name="viewport" content="width=device-width, initial-scale=1.0">
-            <title>' . htmlspecialchars($subject) . '</title>
-        </head>
-        <body style="margin: 0; padding: 0; background-color: #f8fafc; font-family: -apple-system, BlinkMacSystemFont, \'Segoe UI\', Roboto, Helvetica, Arial, sans-serif; color: #1e293b; -webkit-font-smoothing: antialiased; line-height: 1.6;">
-            <table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0" style="background-color: #f8fafc; padding: 40px 16px;">
-                <tr>
-                    <td align="center">
-                        <table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0" style="max-width: 520px; background-color: #ffffff; border: 1px solid #e2e8f0; border-radius: 12px; padding: 40px 36px; text-align: left; box-shadow: 0 1px 3px rgba(0,0,0,0.03);">
-                            <tr>
-                                <td style="padding-bottom: 24px; border-bottom: 1px solid #f1f5f9;">
-                                    <div style="font-size: 22px; font-weight: 800; font-family: -apple-system, BlinkMacSystemFont, \'Segoe UI\', Roboto, sans-serif; letter-spacing: -0.5px; line-height: 1;">
-                                        <span style="color: #0f172a;">FASTNET</span><span style="color: #ea580c;">STAYS</span><span style="color: #006CE4; font-size: 17px; font-weight: 700;">.com</span>
-                                    </div>
-                                </td>
-                            </tr>
-                            <tr>
-                                <td style="padding-top: 24px;">
-                                    <div style="display: inline-block; background-color: #ffedd5; color: #ea580c; font-size: 11px; font-weight: 700; padding: 4px 10px; border-radius: 6px; text-transform: uppercase; margin-bottom: 16px;">
-                                        ' . htmlspecialchars($headline) . '
-                                    </div>
-                                    <h1 style="margin: 0 0 16px 0; font-size: 20px; font-weight: 700; color: #0f172a;">
-                                        Subscription Confirmed
-                                    </h1>
-                                    <p style="margin: 0 0 16px 0; font-size: 15px; color: #334155;">
-                                        ' . htmlspecialchars($description) . '
-                                    </p>
-                                    <div style="background-color: #f8fafc; border-radius: 8px; border: 1px solid #e2e8f0; padding: 16px; margin-bottom: 24px;">
-                                        <p style="margin: 0; font-size: 13px; color: #64748b;">
-                                            <strong>Subscribed Email:</strong> ' . htmlspecialchars($toEmail) . '
-                                        </p>
-                                    </div>
-                                    <p style="margin: 0; font-size: 13px; color: #94a3b8;">
-                                        If you did not request this, you can safely disregard this email or unsubscribe at any time.
-                                    </p>
-                                </td>
-                            </tr>
-                            <tr>
-                                <td style="padding-top: 32px; border-top: 1px solid #f1f5f9; text-align: center; font-size: 12px; color: #94a3b8;">
-                                    &copy; ' . date('Y') . ' Fastnetstays.com. Dar es Salaam, Tanzania.
-                                </td>
-                            </tr>
-                        </table>
-                    </td>
-                </tr>
-            </table>
-        </body>
-        </html>';
-
-        $response = self::post($apiKey, "{$fromName} <{$primaryFrom}>", $toEmail, $subject, $html);
-
-        if (isset($response['statusCode']) && $response['statusCode'] === 403) {
-            $response = self::post($apiKey, "{$fromName} <onboarding@resend.dev>", $toEmail, $subject, $html);
-        }
-
-        return isset($response['id']);
+        return self::deliver('careers', $toEmail, 'emails.subscription', [
+            'subject'     => $careers
+                ? 'You are subscribed to Fastnetstays.com Career & Job Alerts'
+                : 'Welcome to FastNetStays Updates & News',
+            'badge'       => $careers ? 'Career alerts' : 'Subscribed',
+            'headline'    => $careers ? 'Career alerts are on' : 'Welcome to FastNetStays Updates',
+            'description' => $careers
+                ? 'We will email you when we open new host or partner roles in Tanzania.'
+                : 'Occasional news, travel tips and member-only deals. No noise.',
+            'bullets'     => $careers
+                ? ['New host and partner roles', 'Listing opportunities across Tanzania']
+                : ['Travel tips from our team', 'Member-only pricing', 'New destinations as they launch'],
+            'portalUrl'   => self::frontendBase() . '/',
+        ], $careers
+                ? 'You are subscribed to Fastnetstays.com Career & Job Alerts'
+                : 'Welcome to FastNetStays Updates & News',
+            'subscription');
     }
 
-    // ── Download URL → base64 string ──────────────────────────────────────────
-    private static function fetchImage(string $url): ?string
-    {
-        $ch = curl_init($url);
-        curl_setopt_array($ch, [
-            CURLOPT_RETURNTRANSFER => true,
-            CURLOPT_SSL_VERIFYPEER => false,
-            CURLOPT_FOLLOWLOCATION => true,
-            CURLOPT_TIMEOUT        => 15,
-        ]);
-        $body = curl_exec($ch);
-        $code = curl_getinfo($ch, CURLINFO_HTTP_CODE);
-        curl_close($ch);
+    // ── Internals ─────────────────────────────────────────────────────────────
 
-        if (!$body || $code < 200 || $code >= 300) {
-            Log::warning("Could not fetch email asset from {$url} (HTTP {$code})");
+    private static function formatDate($value): ?string
+    {
+        if (empty($value)) {
             return null;
         }
 
-        return base64_encode($body);
+        try {
+            return \Illuminate\Support\Carbon::parse($value)->format('d M Y');
+        } catch (\Throwable $e) {
+            return null;
+        }
+    }
+
+    /**
+     * Render a template and deliver it, falling back to a verified-on-any-account
+     * sender if the role domain is not verified in Resend.
+     */
+    private static function deliver(
+        string $role,
+        ?string $to,
+        string $view,
+        array  $data,
+        string $subject,
+        string $label
+    ): bool {
+        if (!$to || !filter_var($to, FILTER_VALIDATE_EMAIL)) {
+            Log::warning("Resend: skipping {$label} — invalid or missing recipient address.");
+            return false;
+        }
+
+        $key = (string) env('RESEND_API_KEY', '');
+        if ($key === '') {
+            Log::error("Resend: cannot send {$label} to {$to} — RESEND_API_KEY is not set.");
+            return false;
+        }
+
+        try {
+            $html = view($view, $data)->render();
+        } catch (\Throwable $e) {
+            Log::error("Resend: {$view} failed to render for {$to}: " . $e->getMessage());
+            return false;
+        }
+
+        [$envKey, $defaultAddress, $defaultName] = self::SENDERS[$role];
+        $address = (string) env($envKey, $defaultAddress);
+        $name    = (string) env($envKey . '_NAME', $defaultName);
+
+        $response = self::post($key, "{$name} <{$address}>", $to, $subject, $html);
+
+        // 403 = sender domain not verified for this Resend account.
+        if (($response['statusCode'] ?? null) === 403) {
+            Log::warning("Resend: sender {$address} not verified for {$label} — retrying with fallback sender.");
+            $response = self::post($key, "{$name} <" . self::FALLBACK_SENDER . '>', $to, $subject, $html);
+        }
+
+        if (isset($response['id'])) {
+            Log::info("Resend: {$label} sent to {$to}. Id: {$response['id']}");
+            return true;
+        }
+
+        Log::error("Resend: {$label} to {$to} failed. Response: " . json_encode($response));
+        return false;
     }
 
     // ── POST to Resend REST API ───────────────────────────────────────────────
@@ -608,9 +243,12 @@ class ResendMailService
         $ch = curl_init('https://api.resend.com/emails');
         curl_setopt_array($ch, [
             CURLOPT_RETURNTRANSFER => true,
-            CURLOPT_SSL_VERIFYPEER => false,
-            CURLOPT_TIMEOUT        => 3,
-            CURLOPT_CONNECTTIMEOUT => 2,
+            // TLS verification stays ON. This transport had it disabled, which
+            // exposed the API key and message bodies to interception.
+            CURLOPT_SSL_VERIFYPEER => true,
+            CURLOPT_SSL_VERIFYHOST => 2,
+            CURLOPT_TIMEOUT        => 10,
+            CURLOPT_CONNECTTIMEOUT => 5,
             CURLOPT_POST           => true,
             CURLOPT_HTTPHEADER     => [
                 'Authorization: Bearer ' . $key,
@@ -618,9 +256,26 @@ class ResendMailService
             ],
             CURLOPT_POSTFIELDS => json_encode($payload),
         ]);
-        $raw = curl_exec($ch);
+        $raw  = curl_exec($ch);
+        $err  = curl_error($ch);
+        $code = curl_getinfo($ch, CURLINFO_HTTP_CODE);
         curl_close($ch);
 
-        return json_decode($raw, true) ?? [];
+        if ($raw === false) {
+            Log::error("Resend: transport error (HTTP {$code}): {$err}");
+            return ['statusCode' => $code ?: 0];
+        }
+
+        $decoded = json_decode($raw, true);
+        if (!is_array($decoded)) {
+            Log::error("Resend: non-JSON response (HTTP {$code}): " . substr((string) $raw, 0, 300));
+            return ['statusCode' => $code];
+        }
+
+        // Surface the real HTTP status so the 403 sender-fallback check works
+        // even when Resend's error body omits statusCode.
+        $decoded['statusCode'] = $decoded['statusCode'] ?? $code;
+
+        return $decoded;
     }
 }

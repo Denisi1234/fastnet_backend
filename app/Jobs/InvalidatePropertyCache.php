@@ -2,6 +2,7 @@
 
 namespace App\Jobs;
 
+use App\Services\PropertySearchService;
 use Illuminate\Bus\Queueable;
 use Illuminate\Contracts\Queue\ShouldQueue;
 use Illuminate\Foundation\Bus\Dispatchable;
@@ -36,26 +37,16 @@ class InvalidatePropertyCache implements ShouldQueue
             if ($this->propertyId) {
                 Cache::forget("property:{$this->propertyId}");
                 Cache::forget("property:detail:{$this->propertyId}");
+                Cache::forget("property:detail:v2:{$this->propertyId}");
             }
 
-            // 2. Invalidate the city-level listing cache
-            if ($this->city) {
-                $cityKey = 'properties:city:' . strtolower($this->city);
-                Cache::forget($cityKey);
-            }
+            // 2. Bump the search generation. Listing keys are versioned
+            //    (search:{x}:v{n}, properties:city:{x}:v{n}), so forgetting a
+            //    single literal key would leave every version in place. One
+            //    bump retires them all at once.
+            $version = PropertySearchService::bumpSearchVersion();
 
-            // 3. Always bust the hot deals / featured properties cache
-            Cache::forget('properties:hot_deals');
-            Cache::forget('properties:all');
-
-            // 4. Bust popular destination caches for major cities
-            $popularCities = ['dar es salaam', 'zanzibar', 'arusha', 'dodoma', 'mwanza', 'mbeya'];
-            foreach ($popularCities as $city) {
-                Cache::forget("properties:city:{$city}");
-                Cache::forget("search:{$city}");
-            }
-
-            Log::info("Property cache invalidation complete for property #{$this->propertyId}.");
+            Log::info("Property cache invalidation complete for property #{$this->propertyId} (search v{$version}).");
         } catch (\Exception $e) {
             Log::error("InvalidatePropertyCache failed: " . $e->getMessage());
         }

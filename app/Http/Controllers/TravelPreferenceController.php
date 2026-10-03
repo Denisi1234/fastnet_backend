@@ -13,7 +13,13 @@ class TravelPreferenceController extends Controller
      */
     public function getPreferences(Request $request)
     {
-        $userId = $request->user() ? $request->user()->id : ($request->input('user_id') ?? 'guest');
+        // Per-person: the 'guest' bucket was shared by every anonymous
+        // visitor, leaking one person's travel preferences to the next.
+        $user = $request->user();
+        if (!$user) {
+            return response()->json(['message' => 'Authentication required.'], 401);
+        }
+        $userId = $user->id;
         $cacheKey = "user_travel_prefs_{$userId}";
 
         $defaultPrefs = [
@@ -49,7 +55,13 @@ class TravelPreferenceController extends Controller
             'dietary_requirements' => 'nullable|string',
         ]);
 
-        $userId = $request->user() ? $request->user()->id : ($request->input('user_id') ?? 'guest');
+        // Per-person: the 'guest' bucket was shared by every anonymous
+        // visitor, leaking one person's travel preferences to the next.
+        $user = $request->user();
+        if (!$user) {
+            return response()->json(['message' => 'Authentication required.'], 401);
+        }
+        $userId = $user->id;
         $cacheKey = "user_travel_prefs_{$userId}";
 
         $existing = Cache::get($cacheKey, [

@@ -21,15 +21,15 @@ class PropertySeeder extends Seeder
 
         // Available real hotel/lodge image assets in the web project
         $sourceImages = [
-            '/home/hp/Documents/web/webroot/assets/img/property/img-1.jpg',
-            '/home/hp/Documents/web/webroot/assets/img/property/img-2.jpg',
-            '/home/hp/Documents/web/webroot/assets/img/property/img-3.jpg',
-            '/home/hp/Documents/web/webroot/assets/img/property/img-4.jpg',
-            '/home/hp/Documents/web/webroot/assets/img/property/img-5.jpg',
-            '/home/hp/Documents/web/webroot/assets/img/property/img-6.jpg',
-            '/home/hp/Documents/web/webroot/assets/img/property/img-7.jpg',
-            '/home/hp/Documents/web/webroot/assets/img/property/img-8.jpg',
-            '/home/hp/Documents/web/webroot/assets/img/banner-hotel.jpg',
+            '/home/hp/Documents/omary/web/webroot/assets/img/property/img-1.jpg',
+            '/home/hp/Documents/omary/web/webroot/assets/img/property/img-2.jpg',
+            '/home/hp/Documents/omary/web/webroot/assets/img/property/img-3.jpg',
+            '/home/hp/Documents/omary/web/webroot/assets/img/property/img-4.jpg',
+            '/home/hp/Documents/omary/web/webroot/assets/img/property/img-5.jpg',
+            '/home/hp/Documents/omary/web/webroot/assets/img/property/img-6.jpg',
+            '/home/hp/Documents/omary/web/webroot/assets/img/property/img-7.jpg',
+            '/home/hp/Documents/omary/web/webroot/assets/img/property/img-8.jpg',
+            '/home/hp/Documents/omary/web/webroot/assets/img/banner-hotel.jpg',
         ];
 
         // Filter for existing source files

@@ -199,15 +199,37 @@ class PaymentController extends Controller
 
         $bookingCode = $request->input('utilityref') ?? $request->input('externalId') ?? $request->input('booking_code');
         $transactionId = $request->input('reference') ?? $request->input('transaction_id');
-        $rawStatus = strtolower($request->input('transactionstatus') ?? $request->input('status') ?? 'successful');
+
+        // A payload with no recognisable status must NOT be treated as a
+        // success. It previously defaulted to 'successful', so a malformed or
+        // truncated webhook confirmed and captured a booking.
+        $rawInput = $request->input('transactionstatus') ?? $request->input('status');
+
+        if ($rawInput === null || trim((string) $rawInput) === '') {
+            Log::error("AzamPay webhook for {$bookingCode} carried no status. Not confirming.");
+
+            return response()->json([
+                'message' => 'Webhook payload did not include a transaction status.',
+            ], 422);
+        }
+
+        $rawStatus = strtolower(trim((string) $rawInput));
 
         $status = 'pending';
-        if (in_array($rawStatus, ['success', 'successful', 'completed', 'paid', '00'])) {
+        if (in_array($rawStatus, ['success', 'successful', 'completed', 'paid', '00', 'settled'], true)) {
             $status = 'successful';
-        } else if (in_array($rawStatus, ['failed', 'error', 'rejected'])) {
+        } else if (in_array($rawStatus, ['failed', 'error', 'rejected'], true)) {
             $status = 'failed';
-        } else if (in_array($rawStatus, ['cancelled', 'canceled'])) {
+        } else if (in_array($rawStatus, ['cancelled', 'canceled', 'expired', 'timeout'], true)) {
             $status = 'cancelled';
+        } else {
+            // Unrecognised vocabulary: hold for review rather than guess.
+            Log::error("AzamPay webhook for {$bookingCode} had unknown status '{$rawStatus}'. Not confirming.");
+
+            return response()->json([
+                'message' => 'Unrecognised transaction status.',
+                'received_status' => $rawStatus,
+            ], 422);
         }
 
         if (!$bookingCode) {
@@ -264,31 +286,59 @@ class PaymentController extends Controller
             }
 
             if ($status === 'successful') {
-                $booking->update([
+                // Money arrived. Record it regardless of booking state so the
+                // payment row and the ledger stay truthful.
+                $attributes = [
                     'payment_status' => 'paid',
-                    'status' => 'Confirmed',
-                    'payment_reference' => $transactionId,
-                ]);
+                    'payment_reference' => $transactionId ?? $booking->payment_reference,
+                ];
 
-                if ($booking->room) {
-                    $booking->room->update(['status' => 'booked']);
+                if (!$booking->transitionTo('Confirmed', $attributes)) {
+                    // Terminal booking (cancelled/completed) receiving a late
+                    // success. Never move it backwards - keep the state and
+                    // escalate for a manual refund instead.
+                    $booking->forceFill($attributes)->save();
+
+                    Log::error(
+                        "Late successful payment for {$booking->booking_code} while booking is "
+                        ."{$booking->status}. State left unchanged - refund required.",
+                        ['booking_id' => $booking->id, 'transaction_id' => $transactionId]
+                    );
+                } else {
+                    if ($booking->room) {
+                        $booking->room->update(['status' => 'booked']);
+                    }
+
+                    \App\Jobs\SendBookingConfirmationEmail::dispatch($booking->id)->onQueue('notifications');
+                    \App\Jobs\SendBookingConfirmationSms::dispatch($booking->id)->onQueue('notifications');
+
+                    // In-app feed. Inside the transaction on purpose: the rows
+                    // must not appear if the commit fails.
+                    $notifier = app(\App\Services\BookingNotificationService::class);
+                    $notifier->notifyConfirmed($booking);
+                    $notifier->notifyReceipt($booking);
                 }
-
-                \App\Jobs\SendBookingConfirmationEmail::dispatch($booking->id)->onQueue('notifications');
-                \App\Jobs\SendBookingConfirmationSms::dispatch($booking->id)->onQueue('notifications');
             } else if (in_array($status, ['failed', 'cancelled', 'expired'])) {
-                $booking->update([
-                    'payment_status' => $status,
-                    'status' => 'Cancelled',
-                ]);
+                $cancelled = $booking->transitionTo('Cancelled', ['payment_status' => $status]);
+                // Release the room on a failed/expired payment too, otherwise it
+                // stays flagged 'booked' after the guest never actually stayed.
+                app(\App\Services\RoomAvailabilityService::class)
+                    ->syncRoomOccupancy((int) $booking->room_id);
+
+                if ($cancelled) {
+                    app(\App\Services\BookingNotificationService::class)
+                        ->notifyCancelled($booking);
+                }
             }
         });
+
+        $booking->refresh();
 
         return response()->json([
             'message' => 'AzamPay Webhook processed successfully.',
             'booking_code' => $booking->booking_code,
-            'payment_status' => $booking->fresh()->payment_status,
-            'booking_status' => $booking->fresh()->status,
+            'payment_status' => $booking->payment_status,
+            'booking_status' => $booking->status,
         ], 200);
     }
 
@@ -297,10 +347,29 @@ class PaymentController extends Controller
      */
     public function status(Request $request, $codeOrId)
     {
+        // The numeric id branch must be guarded: Postgres throws 22P02
+        // (invalid bigint syntax) when a text value is compared to the id
+        // column, so an unguarded orWhere('id', $codeOrId) turns EVERY
+        // alphanumeric lookup — booking codes and transaction ids alike —
+        // into a 500 instead of a result or a clean 404.
         $booking = Booking::where('booking_code', $codeOrId)
-            ->orWhere('id', $codeOrId)
+            ->when(is_numeric($codeOrId), fn($q) => $q->orWhere('id', $codeOrId))
             ->with(['room.property', 'guest'])
             ->first();
+
+        // The checkout response mints a gateway transaction_id (TX-AZAM-…),
+        // and that is what clients poll with — not the booking code. Resolve
+        // it to its booking so a paid webhook actually surfaces as paid.
+        // Without this, polling by transaction id 404s forever and the
+        // payment page can never leave "pending".
+        if (!$booking) {
+            $payment = Payment::where('transaction_id', $codeOrId)->first();
+            if ($payment) {
+                $booking = Booking::where('id', $payment->booking_id)
+                    ->with(['room.property', 'guest'])
+                    ->first();
+            }
+        }
 
         if (!$booking) {
             return response()->json([

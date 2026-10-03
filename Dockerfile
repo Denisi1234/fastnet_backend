@@ -5,6 +5,9 @@ FROM php:8.4-fpm-alpine
 COPY --from=ghcr.io/mlocati/php-extension-installer /usr/bin/install-php-extensions /usr/local/bin/
 
 # Step 2: Install PHP extensions (IPE handles all APK dev headers + cleanup automatically)
+# redis is mandatory, not optional: the compose stack sets CACHE_STORE=redis
+# and QUEUE_CONNECTION=redis, so without ext-redis every cached/throttled/
+# queued path fatals with Class "Redis" not found.
 RUN install-php-extensions \
     pdo_mysql \
     pdo_pgsql \
@@ -15,7 +18,8 @@ RUN install-php-extensions \
     intl \
     exif \
     opcache \
-    pcntl
+    pcntl \
+    redis
 
 # Step 3: Install system tools (nginx, supervisor, git, unzip)
 RUN apk add --no-cache \
@@ -44,6 +48,8 @@ RUN composer install --no-dev --optimize-autoloader --no-interaction --no-script
 COPY docker/supervisord.conf /etc/supervisord.conf
 COPY docker/nginx.conf /etc/nginx/http.d/default.conf
 COPY docker/php.ini /usr/local/etc/php/conf.d/99_custom.ini
+COPY docker/entrypoint.sh /usr/local/bin/entrypoint.sh
+RUN chmod +x /usr/local/bin/entrypoint.sh
 
 # Step 8: Set storage permissions
 RUN mkdir -p storage/framework/sessions \
@@ -55,4 +61,4 @@ RUN mkdir -p storage/framework/sessions \
 
 EXPOSE 80
 
-CMD ["/usr/bin/supervisord", "-c", "/etc/supervisord.conf"]
+ENTRYPOINT ["/usr/local/bin/entrypoint.sh"]

@@ -50,7 +50,10 @@ class TicketController extends Controller
         ]);
 
         $user = $request->user();
-        $userId = $user ? $user->id : 1;
+
+        // Previously fell back to user id 1, filing every guest's support
+        // ticket against whichever account was first in the table.
+        $userId = $user ? $user->id : null;
 
         $guestEmail = $request->email ?? ($user ? $user->email : null);
         $guestName = $request->name ?? ($user ? $user->name : 'Traveler');

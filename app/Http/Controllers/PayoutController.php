@@ -231,35 +231,37 @@ class PayoutController extends Controller
             $bookingQuery->whereIn('room_id', $roomIds);
         }
 
-        // Calculate gross 90% owner earnings from completed/paid stays
-        $eligibleBookings = (clone $bookingQuery)
-            ->where(function ($q) {
-                $q->whereIn('status', ['Confirmed', 'Checked In', 'Completed'])
-                  ->orWhere('payment_status', 'paid');
-            })
-            ->get();
+        // Calculate gross 90% owner earnings from completed/paid stays.
+        // Aggregated in SQL rather than hydrating every booking row.
+        $fee = "COALESCE(bookings.platform_fee, ROUND(COALESCE(bookings.total_price, 0) * COALESCE(bookings.commission_rate, 10.00) / 100, 2))";
+        $payout = "COALESCE(bookings.owner_payout, ROUND(COALESCE(bookings.total_price, 0) - {$fee}, 2))";
+        $eligible = "(bookings.status IN ('Confirmed','Checked In','Completed') OR bookings.payment_status = 'paid')";
 
-        $totalOwnerEarnings = 0.0;
-        foreach ($eligibleBookings as $b) {
-            $gross = (float) $b->total_price;
-            $rate = ($b->commission_rate !== null) ? (float) $b->commission_rate : 10.00;
-            $fee = ($b->platform_fee !== null) ? (float) $b->platform_fee : round($gross * ($rate / 100), 2);
-            $payout = ($b->owner_payout !== null) ? (float) $b->owner_payout : round($gross - $fee, 2);
+        $earningsRow = (clone $bookingQuery)
+            ->whereRaw($eligible)
+            ->selectRaw("COALESCE(SUM({$payout}), 0) as total_owner_earnings")
+            ->selectRaw("COALESCE(SUM({$fee}), 0) as total_commission")
+            ->selectRaw('COUNT(*) as bookings_count')
+            ->first();
 
-            $totalOwnerEarnings += $payout;
-        }
+        $totalOwnerEarnings = (float) ($earningsRow->total_owner_earnings ?? 0);
 
         // Refunds subtraction
         $refundedBookingsSum = (float) (clone $bookingQuery)->where('payment_status', 'refunded')->sum('total_price');
         $refundedOwnerShare = round($refundedBookingsSum * 0.90, 2);
 
-        // Aggregate payouts table records
-        $payouts = Payout::where('owner_id', $owner->id)->get();
+        // Aggregate payouts table records in one grouped query
+        $payoutTotals = Payout::where('owner_id', $owner->id)
+            ->groupBy('status')
+            ->selectRaw('status, SUM(amount) as total')
+            ->pluck('total', 'status');
 
-        $requestedPayout  = (float) $payouts->where('status', 'REQUESTED')->sum('amount');
-        $processingPayout = (float) $payouts->where('status', 'PROCESSING')->sum('amount');
-        $completedPayout  = (float) $payouts->where('status', 'PAID')->sum('amount');
-        $failedPayout     = (float) $payouts->where('status', 'FAILED')->sum('amount');
+        $payoutSum = fn (string $status): float => (float) ($payoutTotals[$status] ?? 0);
+
+        $requestedPayout  = $payoutSum('REQUESTED');
+        $processingPayout = $payoutSum('PROCESSING');
+        $completedPayout  = $payoutSum('PAID');
+        $failedPayout     = $payoutSum('FAILED');
 
         // Net Available Balance = Owner 90% Earnings - Refunds (Owner share 90%) - Completed Payouts - Requested Payouts - Processing Payouts
         $availableBalance = max(0.0, round($totalOwnerEarnings - $refundedOwnerShare - $completedPayout - $requestedPayout - $processingPayout, 2));

@@ -2,6 +2,7 @@
 
 namespace App\Models;
 
+use App\Services\PropertySearchService;
 use Illuminate\Database\Eloquent\Factories\HasFactory;
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Support\Facades\Cache;
@@ -199,8 +200,23 @@ class Room extends Model
      */
     protected static function booted(): void
     {
+        // Same gap as Property: only `deleting` invalidated, so adding or
+        // editing a room left stale search results (including availability and
+        // the lowest rate shown on cards) cached for the full TTL.
+        $invalidate = function (Room $room): void {
+            PropertySearchService::bumpSearchVersion();
+            if ($room->property_id) {
+                Cache::forget("property:detail:v2:{$room->property_id}");
+                Cache::forget("property:detail:{$room->property_id}");
+            }
+        };
+
+        static::created($invalidate);
+        static::updated($invalidate);
+        static::deleted($invalidate);
+
         static::deleting(function (Room $room): void {
-            Cache::increment('properties:search-version');
+            PropertySearchService::bumpSearchVersion();
             if ($room->property_id) {
                 Cache::forget("property:detail:v2:{$room->property_id}");
             }

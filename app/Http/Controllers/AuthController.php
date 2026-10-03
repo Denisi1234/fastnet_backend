@@ -3,7 +3,6 @@
 namespace App\Http\Controllers;
 
 use App\Models\User;
-use App\Mail\WelcomeUserMail;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Hash;
 use Illuminate\Support\Facades\Mail;
@@ -18,21 +17,36 @@ class AuthController extends Controller
             'name' => 'required|string|max:255',
             'email' => 'required|string|email|max:255',
             'password' => 'required|string|min:8',
-            'phone_number' => 'nullable|string',
-            'role' => 'nullable|string|in:customer,owner,admin',
+            'phone_number' => 'nullable|string|max:50',
+            'role' => 'nullable|string|in:customer,owner',
         ]);
 
-        $existing = User::where('email', $request->email)
-            ->when(!empty($request->phone_number), function ($q) use ($request) {
-                return $q->orWhere('phone_number', $request->phone_number);
-            })
-            ->first();
+        $phone = $request->phone_number !== null ? trim((string) $request->phone_number) : '';
+        $emailTaken = User::where('email', $request->email)->exists();
 
-        if ($existing) {
+        // A phone number must resolve to exactly one account: sign-in accepts a
+        // phone number, and the OTP lookup in LoginOtpController does
+        // where(phone_number)->first(). Two accounts sharing a number would make
+        // either lookup return an arbitrary account, so a duplicate number is
+        // rejected rather than stored.
+        $phoneTaken = $phone !== '' && User::where('phone_number', $phone)->exists();
+
+        if ($emailTaken) {
             return response()->json([
-                'message' => 'An account with this email or phone number already exists. Please sign in instead.',
+                'message' => 'An account already exists with this email address. Sign in instead, or register with a different email.',
                 'errors' => [
-                    'email' => ['An account with this email or phone number already exists. Please sign in instead.']
+                    'email' => ['An account already exists with this email address. Sign in instead, or register with a different email.']
+                ]
+            ], 422);
+        }
+
+        if ($phoneTaken) {
+            // Worth distinguishing from the email case: someone may legitimately
+            // want a second, separate account and only the number overlaps.
+            return response()->json([
+                'message' => 'That phone number is already linked to an account. Use a different number, or leave it blank if it is optional.',
+                'errors' => [
+                    'phone_number' => ['That phone number is already linked to an account. Use a different number, or leave it blank if it is optional.']
                 ]
             ], 422);
         }
@@ -41,8 +55,11 @@ class AuthController extends Controller
             'name' => $request->name,
             'email' => $request->email,
             'password' => Hash::make($request->password),
-            'phone_number' => $request->phone_number,
-            'role' => $request->role ?? 'customer',
+            'phone_number' => $phone !== '' ? $phone : null,
+            // 'admin' is NOT accepted from the request body. It used to be, which
+            // meant anyone could self-register as an administrator. Promotion to
+            // admin happens server-side via /admin endpoints only.
+            'role' => $request->role === 'owner' ? 'owner' : 'customer',
         ]);
 
         try {
@@ -93,6 +110,15 @@ class AuthController extends Controller
         }
         Log::info("AUTH DEBUG 7 — PASSWORD VERIFICATION COMPLETE");
 
+        // A suspended account must not be able to mint a fresh token.
+        if ($user->status !== null && strtolower((string) $user->status) !== 'active') {
+            Log::warning("AUTH BLOCKED — account {$user->id} status={$user->status}");
+
+            return response()->json([
+                'message' => 'This account is not active. Please contact support.',
+            ], 403);
+        }
+
         Log::info("AUTH DEBUG 8 — AUTHENTICATION/TOKEN OR SESSION CREATION START");
         $token = $user->createToken('auth_token')->plainTextToken;
         Log::info("AUTH DEBUG 9 — AUTHENTICATION/TOKEN OR SESSION CREATION COMPLETE");
@@ -115,6 +141,20 @@ class AuthController extends Controller
         ]);
     }
 
+    /**
+     * Passwordless sign-in entry point.
+     *
+     * Security history: this issued a Sanctum token for ANY matched user with
+     * no proof of ownership, created accounts with the hardcoded password
+     * "fastnet123456", and (until hardened) signed brand-new contacts straight
+     * in with zero proof they controlled the address or number — letting
+     * anyone mint accounts for addresses they don't own, which then collide
+     * in login's orWhere(phone) lookup.
+     *
+     * Now it never creates an account and never issues a token. Every contact
+     * — known or new — must prove control via the OTP flow; LoginOtpController
+     * creates the account only after the code verifies.
+     */
     public function easyAuth(Request $request)
     {
         $request->validate([
@@ -123,64 +163,29 @@ class AuthController extends Controller
 
         $login = trim($request->login);
         $isEmail = filter_var($login, FILTER_VALIDATE_EMAIL);
-        $isNewUser = false;
 
         if ($isEmail) {
-            $user = User::where('email', $login)->first();
-            if (!$user) {
-                $name = explode('@', $login)[0];
-                $user = User::create([
-                    'name' => ucfirst($name),
-                    'email' => $login,
-                    'password' => Hash::make('fastnet123456'),
-                    'role' => 'customer',
-                ]);
-                $isNewUser = true;
-            }
+            $user = User::where('email', strtolower($login))->first();
         } else {
+            // Exact match only. This used to also try a LIKE '%last8digits%'
+            // fallback, which both mis-identified real users and turned the
+            // endpoint into a fuzzy "does this number exist" oracle.
             $cleanPhone = preg_replace('/[^0-9+]/', '', $login);
-            $user = User::where('phone_number', $cleanPhone)
-                        ->orWhere('phone_number', 'LIKE', "%" . substr($cleanPhone, -8) . "%")
-                        ->first();
-            if (!$user) {
-                $dummyEmail = 'user_' . preg_replace('/[^0-9]/', '', $cleanPhone) . '@fastnetstays.com';
-                $user = User::create([
-                    'name' => 'Guest ' . substr($cleanPhone, -4),
-                    'email' => $dummyEmail,
-                    'phone_number' => $cleanPhone,
-                    'password' => Hash::make('fastnet123456'),
-                    'role' => 'customer',
-                ]);
-                $isNewUser = true;
-            }
+            $user = User::where('phone_number', $cleanPhone)->first();
         }
 
-        if ($isNewUser) {
-            try {
-                \App\Services\ResendMailService::sendWelcomeEmail($user);
-            } catch (\Throwable $e) {
-                Log::warning("Welcome email failed: " . $e->getMessage());
-            }
+        if ($user) {
+            Log::info("easyAuth challenge issued for existing account {$user->id}.");
         } else {
-            // Send NextSMS notification for existing users logging in
-            if (!empty($user->phone_number)) {
-                try {
-                    $smsMessage = "Hi {$user->name}, a new login was detected on your FastNetStays account.";
-                    \App\Services\NextSmsService::sendSms($user->phone_number, $smsMessage);
-                } catch (\Throwable $e) {
-                    Log::warning("SMS alert failed: " . $e->getMessage());
-                }
-            }
+            Log::info("easyAuth challenge issued for new contact.");
         }
-
-        $token = $user->createToken('auth_token')->plainTextToken;
 
         return response()->json([
-            'message' => 'Signed in successfully',
-            'access_token' => $token,
-            'token_type' => 'Bearer',
-            'user' => $user,
-        ]);
+            'message' => 'Verify this contact to continue.',
+            'verification_required' => true,
+            'resend_endpoint' => '/api/login/otp/request',
+            'verify_endpoint' => '/api/login/otp/verify',
+        ], 202);
     }
 
     public function me(Request $request)
@@ -189,38 +194,26 @@ class AuthController extends Controller
     }
 
     /**
-     * Upgrade an authenticated customer to host/owner (real working join-us flow).
-     * Admins/owners are idempotent. Customers become owner with Pending Verification status.
+     * Retired: a customer can no longer be promoted to owner in place.
+     *
+     * The product rule is that a guest account (bookings, stays) is a different
+     * thing from a host account (listings, payouts), and someone who wants to
+     * host must register a separate host account with its own sign-in. This
+     * endpoint used to let any signed-in customer become owner with one call,
+     * which silently merged the two identities and made the guest's booking
+     * history and the host's payout account the same record.
+     *
+     * It is kept as a 410 rather than deleted so a stale mobile build gets a
+     * clear, actionable answer instead of a bare 404. Nothing in this repo
+     * calls it any more.
      */
     public function becomeHost(Request $request)
     {
-        $user = $request->user();
-        if (in_array($user->role, ['owner', 'admin'], true)) {
-            return response()->json([
-                'message' => 'Already a host.',
-                'user' => $user,
-            ]);
-        }
-
-        $request->validate([
-            'phone_number' => 'nullable|string|max:50',
-            'business_name' => 'nullable|string|max:255',
-        ]);
-
-        $updates = ['role' => 'owner', 'status' => 'Pending Verification'];
-        if ($request->filled('phone_number')) {
-            $updates['phone_number'] = trim((string)$request->input('phone_number'));
-        }
-        // business_name is kept for future owner profile; store in bio if bio empty
-        if ($request->filled('business_name') && empty($user->bio)) {
-            $updates['bio'] = trim((string)$request->input('business_name'));
-        }
-        $user->update($updates);
-
         return response()->json([
-            'message' => 'Upgraded to host. You can now list your property.',
-            'user' => $user->fresh(),
-        ]);
+            'message' => 'A guest account cannot be upgraded to a host account. '
+                .'Please register a separate host account and sign in to it.',
+            'register_endpoint' => '/api/register',
+        ], 410);
     }
 
     public function logout(Request $request)

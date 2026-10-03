@@ -26,3 +26,19 @@ _ide_helper.php
 Homestead.json
 Homestead.yaml
 Thumbs.db
+
+# Runtime artifacts that must never be committed
+/storage/framework/cache/data/*
+/storage/framework/sessions/*
+/storage/framework/views/*
+/storage/logs/*.log
+/bootstrap/cache/*.php
+!.gitignore
+!.gitkeep
+
+# One-off debug scripts. Use tests/ or artisan commands instead.
+.phpunit.result.cache
+
+# Real environment files: only *.example is tracked.
+/.env.*
+!/.env.example

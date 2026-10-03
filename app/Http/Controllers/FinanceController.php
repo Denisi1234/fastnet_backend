@@ -227,7 +227,7 @@ class FinanceController extends Controller
         $user = $request->user();
         $isAdmin = ($user->role === 'admin');
 
-        $query = Booking::with(['guest', 'room.property', 'payments']);
+        $query = Booking::with(['guest', 'room.property.host', 'payments']);
 
         // Scope to owner if not admin
         if (!$isAdmin) {
@@ -330,7 +330,7 @@ class FinanceController extends Controller
             }
 
             $property = optional(optional($b->room)->property);
-            $host = $property ? User::find($property->host_id) : null;
+            $host = $property ? $property->host : null;
 
             return [
                 'transaction_id'     => 'TX-' . str_pad($b->id, 8, '0', STR_PAD_LEFT),

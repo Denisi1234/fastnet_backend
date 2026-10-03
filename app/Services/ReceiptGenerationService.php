@@ -10,12 +10,27 @@ class ReceiptGenerationService
     public function generate(array $data): array
     {
         $bookingCode = preg_replace('/[^A-Za-z0-9\-]/', '', $data['booking_code'] ?? '');
-        $guestName = $data['guest_name'] ?? 'Valued Guest';
-        $propertyName = $data['property_name'] ?? 'FastNetStays Property';
-        $propertyAddress = $data['property_address'] ?? 'Tanzania';
-        $checkIn = $data['check_in'] ?? 'Jan 10, 23';
-        $checkOut = $data['check_out'] ?? 'Jan 11, 23';
-        $totalPrice = $data['total_price'] ?? 'TSh 105,020';
+        // A receipt is a financial document. It previously defaulted to
+        // invented values ('Valued Guest', 'TSh 105,020', 'Jan 10, 23'), so a
+        // request missing fields produced a convincing but entirely fictional
+        // bill. Require the essentials and report what is missing instead.
+        $required = ['guest_name', 'property_name', 'check_in', 'check_out', 'total_price'];
+        $missing = array_values(array_filter($required, fn ($k) => !isset($data[$k]) || $data[$k] === ''));
+
+        if ($missing) {
+            return [
+                'status' => 'error',
+                'message' => 'Receipt cannot be generated: missing ' . implode(', ', $missing) . '.',
+            ];
+        }
+
+        $guestName = (string) $data['guest_name'];
+        $propertyName = (string) $data['property_name'];
+        $propertyAddress = (string) ($data['property_address'] ?? '');
+        $checkIn = (string) $data['check_in'];
+        $checkOut = (string) $data['check_out'];
+        $totalPrice = (string) $data['total_price'];
+        $roomNumber = (string) ($data['room_number'] ?? '');
         $guestPreferences = $data['guest_preferences'] ?? [
             'smoking_preference' => 'Non-smoking',
             'bed_preference' => 'No preference',
@@ -37,7 +52,9 @@ class ReceiptGenerationService
                 'total_price' => $totalPrice,
                 'guest_preferences' => $guestPreferences,
                 'issued_at' => date('Y-m-d H:i:s'),
-                'qr_payload' => "FASTNETSTAYS-BOOKING:{$bookingCode}|LODGE:{$propertyName}|ROOM:1|GUEST:" . strtoupper($guestName),
+                // Room came from the booking. It was hardcoded to ROOM:1, so every
+                // receipt QR pointed at room 1 regardless of the actual stay.
+                'qr_payload' => "FASTNETSTAYS-BOOKING:{$bookingCode}|LODGE:{$propertyName}|ROOM:{$roomNumber}|GUEST:" . strtoupper($guestName),
             ];
             $rawBytes = json_encode($receiptData, JSON_PRETTY_PRINT);
         }
@@ -47,7 +64,10 @@ class ReceiptGenerationService
         $compressedSize = strlen($compressedBytes);
         $savedRatio = $originalSize > 0 ? round((1 - ($compressedSize / $originalSize)) * 100, 2) . '%' : '0%';
 
-        $fileName = "receipts/{$bookingCode}.pdf";
+        // The payload is gzipped JSON, not PDF bytes. It was written to a
+        // ".pdf" filename, so the returned link was a file no PDF reader could
+        // open. Name it for what it actually is.
+        $fileName = "receipts/{$bookingCode}.receipt.json.gz";
 
         try {
             // Save directly to local disk (Railway Persistent Volume) instead of Supabase
@@ -59,6 +79,8 @@ class ReceiptGenerationService
                 'status' => 'success',
                 'booking_code' => $bookingCode,
                 'receipt_url' => $publicUrl,
+                'format' => 'application/gzip',
+                'content_description' => 'Gzipped JSON receipt payload',
                 'original_size_bytes' => $originalSize,
                 'compressed_size_bytes' => $compressedSize,
                 'compression_ratio' => $savedRatio,

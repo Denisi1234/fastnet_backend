@@ -6,8 +6,6 @@ use App\Models\Booking;
 use App\Models\Room;
 use App\Models\RoomLock;
 use App\Jobs\InvalidatePropertyCache;
-use App\Jobs\SendBookingConfirmationEmail;
-use App\Jobs\SendBookingConfirmationSms;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Redis;
 use Illuminate\Support\Facades\Log;
@@ -24,7 +22,7 @@ class BookingCreationService
         $this->availabilityService = $availabilityService;
     }
 
-    public function createBooking(int $roomId, int $guestId, string $checkIn, string $checkOut, int $quantity, int $guests, ?string $promoCode = null): array
+    public function createBooking(int $roomId, int $guestId, string $checkIn, string $checkOut, int $quantity, int $guests, ?string $promoCode = null, array $extras = []): array
     {
         $lockKey = "booking_lock:room_{$roomId}";
 
@@ -48,7 +46,7 @@ class BookingCreationService
             ];
         }
 
-        return DB::transaction(function () use ($roomId, $guestId, $checkIn, $checkOut, $quantity, $guests, $promoCode) {
+        return DB::transaction(function () use ($roomId, $guestId, $checkIn, $checkOut, $quantity, $guests, $promoCode, $extras) {
             $room = Room::with('property')->where('id', $roomId)->lockForUpdate()->first();
             if (!$room) {
                 return [
@@ -116,12 +114,19 @@ class BookingCreationService
                 'status'          => 'Pending',
                 'payment_status'  => 'pending',
                 'booking_code'    => 'BK' . strtoupper(Str::random(8)),
+                'payment_method'  => isset($extras['payment_method']) ? trim((string)$extras['payment_method']) ?: null : null,
+                'payment_phone'   => isset($extras['payment_phone']) ? trim((string)$extras['payment_phone']) ?: null : null,
+                'special_requests' => self::mergeRequests($extras),
             ]);
 
             RoomLock::where('room_id', $roomId)->where('guest_id', $guestId)->delete();
 
-            SendBookingConfirmationEmail::dispatch($booking->id)->onQueue('notifications');
-            SendBookingConfirmationSms::dispatch($booking->id)->onQueue('notifications');
+            // NOTE: no confirmation email/SMS here. This booking is Pending and
+            // unpaid, so calling it "confirmed" would be untrue — and the webhook
+            // already dispatches both once the payment actually succeeds
+            // (PaymentController::webhook). Dispatching in both places sent every
+            // guest two confirmation emails. The "awaiting payment" nudge belongs
+            // to the in-app notification feed, not to a confirmation email.
             InvalidatePropertyCache::dispatch($room->property_id, $room->property->city ?? null)->onQueue('cache');
 
             return [
@@ -147,5 +152,30 @@ class BookingCreationService
                 ]
             ];
         });
+    }
+
+    /**
+     * Fold room/bed preferences into the free-text requests so nothing the
+     * guest selected is lost. Kept as text (not columns) because hosts read
+     * these as notes, never filter on them.
+     */
+    private static function mergeRequests(array $extras): ?string
+    {
+        $parts = [];
+        $roomPref = trim((string)($extras['room_preference'] ?? ''));
+        if ($roomPref !== '') {
+            $parts[] = 'Room preference: ' . $roomPref;
+        }
+        $bedPref = trim((string)($extras['bed_preference'] ?? ''));
+        if ($bedPref !== '') {
+            $parts[] = 'Bed preference: ' . $bedPref;
+        }
+        $notes = trim((string)($extras['special_requests'] ?? ''));
+        if ($notes !== '') {
+            $parts[] = $notes;
+        }
+        $merged = implode("\n", $parts);
+
+        return $merged !== '' ? mb_substr($merged, 0, 2000) : null;
     }
 }

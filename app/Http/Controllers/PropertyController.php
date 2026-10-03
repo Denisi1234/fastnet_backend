@@ -63,7 +63,12 @@ class PropertyController extends Controller
                 'name' => $p->name,
                 'city' => $p->city,
                 'district' => $p->area,
-                'score' => round($p->reviews_avg_rating ?? 9.0, 1),
+                // A property with no reviews has no score. It used to default
+                // to 9.0/10, so unreviewed lodges sorted to the top of search
+                // with a score nobody had given them.
+                'score' => $p->reviews_avg_rating !== null
+                    ? round((float) $p->reviews_avg_rating, 1)
+                    : null,
                 'image' => $p->image_url
             ];
         });
@@ -76,26 +81,120 @@ class PropertyController extends Controller
             ->where('city', 'ilike', '%' . $q . '%')
             ->groupBy('city')
             ->limit(3)
-            ->get();
+            ->pluck('city');
 
-        $mappedDestinations = $destinations->map(function ($d) {
-            $matchingProps = Property::where('city', $d->city)
+        // One grouped aggregate for all suggestion cities instead of loading
+        // every matching property row just to derive MIN() and COUNT().
+        $cityStats = $destinations->isEmpty()
+            ? collect()
+            : Property::whereIn('city', $destinations)
                 ->where(function ($query) {
                     $query->whereNull('status')->orWhereRaw('LOWER(status) = ?', ['active']);
                 })
-                ->get();
-            $minPrice = $matchingProps->min('price_per_night') ?? 50;
+                ->groupBy('city')
+                ->selectRaw('city, MIN(price_per_night) as min_price, COUNT(*) as properties_count')
+                ->get()
+                ->keyBy('city');
+
+        $mappedDestinations = $destinations->map(function ($city) use ($cityStats) {
+            $stat = $cityStats->get($city);
+
             return [
-                'city' => $d->city,
+                'city' => $city,
                 'country' => 'Tanzania',
-                'propertiesCount' => $matchingProps->count(),
-                'startingPriceUSD' => round($minPrice)
+                'propertiesCount' => $stat ? (int) $stat->properties_count : 0,
+                // TZS, not USD - the key name mislabelled the currency, and the
+                // $50 default invented a starting price for cities with no
+                // priced properties.
+                'starting_price' => $stat && $stat->min_price !== null
+                    ? round((float) $stat->min_price)
+                    : null,
+                'currency' => 'TZS',
             ];
         });
 
         return response()->json([
             'destinations' => $mappedDestinations,
             'properties' => $mappedProperties
+        ]);
+    }
+
+    /**
+     * Destination listing for the /destination-detail pages.
+     *
+     * The web app calls GET /destinations but no such route existed, so the
+     * page always rendered empty. There is no destinations table, so this
+     * aggregates real active properties by city and derives a starting price
+     * from actual room rates - no invented places or prices.
+     */
+    public function destinations(Request $request)
+    {
+        $limit = max(1, min(50, (int) $request->input('limit', 24)));
+
+        $rows = Property::query()
+            ->select(['city', 'area', 'name'])
+            ->where(function ($q) {
+                $q->whereNull('status')->orWhereRaw('LOWER(status) = ?', ['active']);
+            })
+            ->whereNotNull('city')
+            ->where('city', '!=', '')
+            ->groupBy('city', 'area', 'name')
+            ->orderBy('city')
+            ->limit($limit * 4)
+            ->get();
+
+        $destinations = [];
+
+        foreach ($rows as $row) {
+            $city = trim((string) $row->city);
+            $key  = strtolower($city);
+
+            if (isset($destinations[$key])) {
+                $destinations[$key]['property_count']++;
+                continue;
+            }
+
+            $property = Property::with('rooms')
+                ->where(function ($q) {
+                    $q->whereNull('status')->orWhereRaw('LOWER(status) = ?', ['active']);
+                })
+                ->where('city', $city)
+                ->orderByDesc('reviews_avg_rating')
+                ->first();
+
+            if (! $property) {
+                continue;
+            }
+
+            // Lowest genuine room rate, falling back to the property's own rate.
+            $prices = $property->rooms->pluck('price')->filter()->map(fn ($p) => (float) $p);
+            $min = $prices->isNotEmpty() ? $prices->min() : (float) ($property->price_per_night ?? 0);
+
+            $destinations[$key] = [
+                'id'              => $property->id,
+                'name'            => $property->area ? $city . ' - ' . $property->area : $city,
+                'title'           => $property->name,
+                'city'            => $city,
+                'area'            => $property->area,
+                'image_url'       => $property->primary_image_url ?: $property->image_url,
+                'price'           => $min > 0 ? $min : null,
+                'price_per_night' => $min > 0 ? $min : null,
+                'currency'        => 'TZS',
+                'rating'          => $property->reviews_avg_rating !== null
+                                        ? (float) $property->reviews_avg_rating
+                                        : null,
+                'property_count'  => 1,
+                'url'             => '/hotel-detail/' . $property->id,
+            ];
+        }
+
+        $list = array_values($destinations);
+        $list = array_slice($list, 0, $limit);
+
+        return response()->json([
+            'status' => 'success',
+            'data'   => $list,
+            'count'  => count($list),
         ]);
     }
 
@@ -142,7 +241,7 @@ class PropertyController extends Controller
         ]);
 
         // Bust Redis cache for this city and all-properties list
-        Cache::increment('properties:search-version');
+        PropertySearchService::bumpSearchVersion();
         InvalidatePropertyCache::dispatch($property->id, $property->city);
 
         // Sync to Meilisearch search index
@@ -279,7 +378,7 @@ class PropertyController extends Controller
         $property->update($updateData);
 
         // Bust Redis cache for this city and all-properties list
-        Cache::increment('properties:search-version');
+        PropertySearchService::bumpSearchVersion();
         InvalidatePropertyCache::dispatch($property->id, $property->city);
 
         // Sync to Meilisearch search index
@@ -319,18 +418,38 @@ class PropertyController extends Controller
         }
         $uniqueRoomTypes = array_unique($roomTypes);
 
-        $desc = "Welcome to {$property->name}, a premier accommodation choice located in " . ($property->area ?? $property->city) . ", {$property->city}. ";
+        // Only state facts the property record actually contains. The previous
+        // copy called every lodge "premier", promised "premium service" and
+        // "an exceptional stay", and claimed it sat "conveniently near local
+        // attractions and transit" - none of which comes from any stored data,
+        // and none of which the platform can stand behind.
+        $where = trim(implode(', ', array_filter([$property->area, $property->city])));
+
+        $desc = $property->name
+            . ($where !== '' ? " is located in {$where}." : '.');
+        $desc .= ' ';
+
         if (!empty($uniqueRoomTypes)) {
-            $desc .= "Our lodge features thoughtfully appointed " . implode(', ', $uniqueRoomTypes) . " accommodations designed for maximum comfort and relaxation. ";
-        } else {
-            $desc .= "Our lodge features thoughtfully appointed guest rooms designed for maximum comfort and relaxation. ";
+            $roomCount = $property->rooms->count();
+            $desc .= sprintf(
+                'It offers %d %s: %s.',
+                $roomCount,
+                $roomCount === 1 ? 'room' : 'rooms',
+                implode(', ', $uniqueRoomTypes)
+            );
         }
 
         if (!empty($allAmenities)) {
-            $desc .= "Guests enjoy high-quality facilities including " . implode(', ', array_slice($allAmenities, 0, 5)) . " ensuring an exceptional stay. ";
+            $desc .= ' Listed amenities: ' . implode(', ', array_slice($allAmenities, 0, 8)) . '.';
         }
 
-        $desc .= "Situated conveniently near local attractions and transit, {$property->name} delivers dedicated hospitality and premium service for business and leisure travelers alike.";
+        if ($property->reviews_count ?? 0) {
+            $desc .= sprintf(' It has %d guest review(s).', (int) $property->reviews_count);
+        }
+
+        if ($property->reviews_avg_rating !== null) {
+            $desc .= sprintf(' Average rating %.1f out of 5.', (float) $property->reviews_avg_rating);
+        }
 
         return response()->json([
             'description' => $desc,
@@ -371,6 +490,12 @@ class PropertyController extends Controller
 
     public function upload(Request $request)
     {
+        // This route is public, so without a session anyone could write files
+        // to the public disk. Uploads are only ever done by signed-in hosts.
+        if (! $request->user('sanctum') && ! $request->user()) {
+            return response()->json(['message' => 'Authentication required to upload files.'], 401);
+        }
+
         $request->validate([
             'file' => 'required|image|max:10240', // 10MB max
         ]);
@@ -567,7 +692,7 @@ class PropertyController extends Controller
             'room_size' => $request->room_size,
         ]);
 
-        Cache::increment('properties:search-version');
+        PropertySearchService::bumpSearchVersion();
         Cache::forget("property:detail:v2:{$property->id}");
         InvalidatePropertyCache::dispatch($property->id, $property->city);
 
@@ -586,9 +711,15 @@ class PropertyController extends Controller
             return response()->json(['message' => 'Property not found'], 404);
         }
 
-        // Authenticated user permission validation (optional for portal sync)
-        $user = $request->user();
-        if ($user && $user->role !== 'admin' && (int)$property->host_id !== (int)$user->id) {
+        // Ownership check.
+        // The guard used to be `if ($user && ...)`, so on this public route an
+        // entirely unauthenticated request skipped the check altogether and
+        // could rewrite any room in the system.
+        $user = $request->user('sanctum') ?? $request->user();
+        if (!$user) {
+            return response()->json(['message' => 'Unauthenticated.'], 401);
+        }
+        if ($user->role !== 'admin' && (int) $property->host_id !== (int) $user->id) {
             return response()->json(['message' => 'Unauthorized to update this room.'], 403);
         }
 
@@ -659,7 +790,7 @@ class PropertyController extends Controller
         }
         $room->update($payload);
 
-        Cache::increment('properties:search-version');
+        PropertySearchService::bumpSearchVersion();
         Cache::forget("property:detail:v2:{$property->id}");
         InvalidatePropertyCache::dispatch($property->id, $property->city);
 
@@ -691,7 +822,7 @@ class PropertyController extends Controller
         }
 
         // Authenticated user permission validation
-        $user = $request->user();
+        $user = $request->user('sanctum') ?? $request->user();
         if (!$user) {
             return response()->json(['message' => 'Unauthenticated.'], 401);
         }

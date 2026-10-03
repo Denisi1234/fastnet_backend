@@ -15,8 +15,16 @@ class PersonalDetailsController extends Controller
     public function getDetails(Request $request)
     {
         $user = $request->user('sanctum') ?? $request->user();
-        if (!$user && $request->filled('user_id')) {
-            $user = User::find($request->input('user_id'));
+
+        // Previously an unauthenticated caller could pass ?user_id=N and read
+        // any user's full profile (name, email, phone, address, DOB). Scope
+        // strictly to the authenticated user.
+        if (! $user) {
+            return response()->json([
+                'status' => 'unauthenticated',
+                'message' => 'Authentication required.',
+                'details' => null,
+            ], 401);
         }
 
         if ($user) {
@@ -51,35 +59,6 @@ class PersonalDetailsController extends Controller
                 'updated_at' => $user->updated_at ? $user->updated_at->toIso8601String() : now()->toIso8601String(),
             ]);
         }
-
-        // Guest / Unauthenticated session fallback
-        $cachedGuest = Cache::get('user_personal_details_guest', []);
-        $defaultDetails = array_merge([
-            'id' => null,
-            'first_name' => '',
-            'last_name' => '',
-            'full_name' => 'Traveler',
-            'name' => 'Traveler',
-            'email' => '',
-            'phone_number' => '',
-            'phone' => '',
-            'date_of_birth' => '',
-            'gender' => 'Not set',
-            'address' => '',
-            'emergency_contact' => '',
-            'bio' => '',
-            'is_verified' => false,
-            'avatar_url' => '',
-            'avatar' => '',
-            'role' => 'traveler',
-        ], is_array($cachedGuest) ? $cachedGuest : []);
-
-        return response()->json([
-            'status' => 'success',
-            'user_id' => null,
-            'details' => $defaultDetails,
-            'updated_at' => now()->toIso8601String(),
-        ]);
     }
 
     /**
@@ -106,8 +85,14 @@ class PersonalDetailsController extends Controller
         ]);
 
         $user = $request->user('sanctum') ?? $request->user();
-        if (!$user && $request->filled('user_id')) {
-            $user = User::find($request->input('user_id'));
+
+        // A caller may only ever write to their own account. This previously
+        // accepted an arbitrary user_id with no authentication, so anyone
+        // could overwrite any user's name, email, phone and address.
+        if (! $user) {
+            return response()->json([
+                'message' => 'Authentication required to update personal details.',
+            ], 401);
         }
 
         $firstName = trim((string)$request->input('first_name', ''));
@@ -172,31 +157,5 @@ class PersonalDetailsController extends Controller
             ]);
         }
 
-        // Guest update
-        $guestData = array_filter([
-            'first_name' => $firstName,
-            'last_name' => $lastName,
-            'full_name' => $fullName ?: 'Traveler',
-            'name' => $fullName ?: 'Traveler',
-            'email' => $email,
-            'phone_number' => $phone,
-            'phone' => $phone,
-            'date_of_birth' => $dob,
-            'gender' => $gender ?: 'Not set',
-            'address' => $address,
-            'emergency_contact' => $emergency,
-            'bio' => $bio,
-            'is_verified' => false,
-            'role' => 'traveler',
-        ], fn($v) => $v !== '');
-
-        Cache::put('user_personal_details_guest', $guestData, now()->addDays(30));
-
-        return response()->json([
-            'status' => 'success',
-            'message' => 'Personal details updated successfully.',
-            'details' => $guestData,
-            'updated_at' => now()->toIso8601String(),
-        ]);
     }
 }

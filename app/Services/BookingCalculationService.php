@@ -95,9 +95,23 @@ class BookingCalculationService
             $isAvailable = $availabilityResult['is_available'];
             $unavailabilityReason = $availabilityResult['unavailability_reason'];
 
-            // Authoritative DB rate (numeric precision)
-            $dbPrice = $room->price ?? $property->price_per_night ?? '85000.00';
-            $nightlyRate = number_format((float)$dbPrice, 2, '.', '');
+            // Authoritative DB rate (numeric precision).
+            //
+            // Previously fell back to a hardcoded '85000.00', so a room with
+            // no configured price silently became an 85,000 TSh booking and
+            // the guest was charged it. A missing price is a configuration
+            // error, not a price.
+            $configuredPrice = $room->price ?? $property->price_per_night;
+
+            if ($configuredPrice === null || (float) $configuredPrice <= 0) {
+                throw new \RuntimeException(sprintf(
+                    'Room %s (property %s) has no nightly rate configured.',
+                    $room->id,
+                    $property->id
+                ));
+            }
+
+            $nightlyRate = number_format((float)$configuredPrice, 2, '.', '');
 
             // room subtotal = nightly rate * nights * quantity
             $roomSubtotal = bcmul(bcmul($nightlyRate, (string)$nights, 4), (string)$quantity, 2);
@@ -116,7 +130,7 @@ class BookingCalculationService
             $calculatedRooms[] = [
                 'room_id'                     => $room->id,
                 'room_number'                 => $room->room_number,
-                'title'                       => $room->room_number ? "Room {$room->room_number}" : ($room->title ?? 'Executive Deluxe Room'),
+                'title'                       => $room->title ?: ($room->room_number ? "Room {$room->room_number}" : null),
                 'owner_nightly_rate'          => (float) $nightlyRate,
                 'owner_nightly_rate_formatted'=> 'TSh ' . number_format((float)$nightlyRate),
                 'processing_fee_per_night'    => (float) $nightlyFee,
@@ -126,7 +140,7 @@ class BookingCalculationService
                 'nights'                      => $nights,
                 'capacity_per_room'           => $roomCapacity,
                 'max_adults'                  => $room->max_adults ?? $roomCapacity,
-                'bed_configuration'           => $room->bed_configuration ?? '1 Extra-Large Double Bed',
+                'bed_configuration'           => $room->bed_configuration,
                 'owner_subtotal'              => (float) $roomSubtotal,
                 'processing_fee'              => (float) $roomProcessingFee,
                 'subtotal'                    => (float) $roomCustomerSubtotal,
@@ -206,7 +220,11 @@ class BookingCalculationService
                 'grand_total'               => (float) $totalAmount,
                 'total_formatted'           => 'TSh ' . number_format((float)$totalAmount),
             ],
-            'cancellation_policy'  => "Free cancellation before {$checkIn}",
+            // Report the property's actual policy. This previously asserted
+            // "Free cancellation before {date}" on every quote regardless of
+            // what the lodge had agreed, and that text reached the guest
+            // through BookingQuoteService and the checkout page.
+            'cancellation_policy' => $property->cancellation_policy ?: null,
         ];
     }
 }

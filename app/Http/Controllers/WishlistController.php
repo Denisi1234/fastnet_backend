@@ -13,14 +13,16 @@ class WishlistController extends Controller
     {
         try {
             $user = $request->user('sanctum') ?? $request->user();
-            $userId = $user ? $user->id : ($request->input('user_id') ?? Auth::id());
 
-            $query = Wishlist::with('property');
-            if ($userId) {
-                $query->where('user_id', $userId);
+            // An unauthenticated read used to skip the where clause and return
+            // every user's saved properties. Require a session.
+            if (! $user) {
+                return response()->json([]);
             }
 
-            $wishlist = $query->orderBy('created_at', 'desc')
+            $wishlist = Wishlist::with('property')
+                ->where('user_id', $user->id)
+                ->orderBy('created_at', 'desc')
                 ->get()
                 ->map(function ($w) {
                     $prop = $w->property;
@@ -28,9 +30,12 @@ class WishlistController extends Controller
                     return [
                         'id' => $prop->id,
                         'name' => $prop->name,
+                        // Report real values only. These used to default to
+                        // 4.8 / 4 stars, so a property with no stored rating
+                        // rendered a confident-looking score that was invented.
                         'city' => $prop->city ?? 'Tanzania',
-                        'star_rating' => $prop->star_rating ?? 4,
-                        'rating' => $prop->rating ?? 4.8,
+                        'star_rating' => $prop->star_rating,
+                        'rating' => $prop->rating,
                         'image_url' => $prop->image_url ?? $prop->primary_image_url ?? '',
                         'primary_image_url' => $prop->primary_image_url ?? $prop->image_url ?? '',
                         'price' => $prop->price_per_night ?? $prop->price ?? 0,
@@ -53,12 +58,18 @@ class WishlistController extends Controller
         $request->validate(['property_id' => 'required|integer']);
         try {
             $user = $request->user('sanctum') ?? $request->user();
-            $userId = $user ? $user->id : ($request->input('user_id') ?? Auth::id());
 
-            if (!$userId) {
-                $firstUser = \App\Models\User::first();
-                $userId = $firstUser ? $firstUser->id : 1;
+            // Previously fell back to User::first() when nobody was
+            // authenticated, so an anonymous POST wrote the favourite into
+            // whichever account happened to be first in the table.
+            if (! $user) {
+                return response()->json([
+                    'status' => 'error',
+                    'message' => 'Sign in to save favourites.',
+                ], 401);
             }
+
+            $userId = $user->id;
 
             $item = Wishlist::firstOrCreate([
                 'user_id' => $userId,

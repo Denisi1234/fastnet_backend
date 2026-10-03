@@ -5,11 +5,14 @@ use App\Http\Controllers\BookingController;
 use App\Http\Controllers\PaymentController;
 use App\Http\Controllers\PropertyController;
 use App\Http\Controllers\MessageController;
+use App\Http\Controllers\NotificationController;
 use App\Http\Controllers\TicketController;
 use App\Http\Controllers\AdminController;
 use App\Http\Controllers\StaffController;
 use App\Http\Controllers\LodgeServiceRequestController;
 use App\Http\Controllers\PasswordResetController;
+use App\Http\Controllers\LoginOtpController;
+use App\Http\Controllers\SavedPaymentMethodController;
 use App\Http\Controllers\ReviewController;
 use App\Http\Controllers\WishlistController;
 use App\Http\Controllers\NewsletterSubscriptionController;
@@ -20,6 +23,15 @@ Route::middleware('throttle:60,1')->group(function () {
     Route::post('/register', [AuthController::class, 'register']);
     Route::post('/login', [AuthController::class, 'login']);
     Route::post('/easy-auth', [AuthController::class, 'easyAuth']);
+});
+
+// Passwordless guest sign-in (public). Tighter bucket than the rest of auth:
+// each request sends a real SMS/email, so it needs its own ceiling rather than
+// sharing the 60/min pool with plain password logins.
+Route::middleware('throttle:10,1')->group(function () {
+    Route::post('/login/otp/request', [LoginOtpController::class, 'request']);
+    Route::post('/login/otp/verify', [LoginOtpController::class, 'verify']);
+    Route::post('/login/otp/resend', [LoginOtpController::class, 'resend']);
 });
 
 // Password Reset & OTP Verification (public)
@@ -34,6 +46,10 @@ Route::middleware('throttle:60,1')->group(function () {
 // Public Property / Lodge discovery & Receipt / Notification routes
 Route::get('/properties', [PropertyController::class, 'index']);
 Route::get('/search/suggestions', [PropertyController::class, 'suggestions']);
+// Destination listing for /destination-detail. Derived from real property
+// rows; there is no destinations table, so this aggregates instead of
+// inventing places.
+Route::get('/destinations', [PropertyController::class, 'destinations']);
 Route::get('/properties/{id}', [PropertyController::class, 'show']);
 Route::get('/properties/{id}/images', [PropertyController::class, 'getImages']);
 Route::get('/properties/{propertyId}/rooms', [PropertyController::class, 'getRooms']);
@@ -86,6 +102,7 @@ Route::get('/bookings/revalidate', [BookingController::class, 'revalidate']);
 Route::post('/bookings/revalidate', [BookingController::class, 'revalidate']);
 Route::post('/bookings/create', [BookingController::class, 'store']);
 Route::get('/bookings', [BookingController::class, 'index']);
+Route::get('/bookings/{id}', [BookingController::class, 'show']);
 Route::delete('/bookings/{id}', [BookingController::class, 'cancel']);
 
 // AzamPay Payment gateway routes (Public)
@@ -94,6 +111,9 @@ Route::post('/payments/webhook', [PaymentController::class, 'webhook']);
 Route::get('/payments/status/{codeOrId}', [PaymentController::class, 'status']);
 // File upload & Room management (Public)
 Route::post('/upload', [PropertyController::class, 'upload']);
+// Public read: the guest checkout loads a single room by id. showRoom() still
+// scopes authenticated non-owners out, and returns nothing sensitive.
+Route::get('/rooms/{id}', [PropertyController::class, 'showRoom']);
 Route::put('/rooms/{id}', [PropertyController::class, 'updateRoom']);
 Route::delete('/rooms/{id}', [PropertyController::class, 'destroyRoom']);
 
@@ -107,10 +127,25 @@ Route::middleware('auth:sanctum')->group(function () {
     Route::post('/logout', [AuthController::class, 'logout']);
     // Host onboarding: customer upgrades to owner (real working join-us flow)
     Route::post('/become-host', [AuthController::class, 'becomeHost']);
+
+    // ── In-app notifications ──────────────────────────────────────────────────
+    // The mobile client already calls GET /notifications and
+    // PATCH /notifications/{id}/read; both returned 404 until now.
+    Route::get('/notifications', [NotificationController::class, 'index']);
+    Route::get('/notifications/unread-count', [NotificationController::class, 'unreadCount']);
+    // read-all is declared before {id}/read so the literal "read-all"
+    // can never be captured as an id.
+    Route::post('/notifications/read-all', [NotificationController::class, 'markAllRead']);
+    Route::patch('/notifications/{id}/read', [NotificationController::class, 'markRead']);
     
     // Booking routes
     Route::post('/bookings', [BookingController::class, 'store']);
     Route::get('/bookings', [BookingController::class, 'index']);
+
+    // Saved mobile-money numbers for checkout (payment-detail page).
+    Route::get('/payment-methods', [SavedPaymentMethodController::class, 'index']);
+    Route::post('/payment-methods', [SavedPaymentMethodController::class, 'store']);
+    Route::delete('/payment-methods/{id}', [SavedPaymentMethodController::class, 'destroy']);
     
     // Property listing (Hosts/Owners only)
     Route::post('/properties', [PropertyController::class, 'store']);
@@ -120,7 +155,6 @@ Route::middleware('auth:sanctum')->group(function () {
     Route::post('/properties/{propertyId}/rooms', [PropertyController::class, 'storeRoom']);
     // Room management for host portal (owner-scoped, admin sees all)
     Route::get('/rooms', [PropertyController::class, 'indexRooms']);
-    Route::get('/rooms/{id}', [PropertyController::class, 'showRoom']);
 
     // Message routes
     Route::get('/messages/threads', [MessageController::class, 'threads']);

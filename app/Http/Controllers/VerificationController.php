@@ -7,6 +7,7 @@ use App\Models\Property;
 use App\Models\OwnerVerification;
 use App\Models\LodgeDocument;
 use App\Models\VerificationRequest;
+use App\Services\PropertySearchService;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Cache;
 
@@ -214,7 +215,7 @@ class VerificationController extends Controller
         // Bust caches so approval is visible immediately (detail + search).
         // Heavy invalidation runs AFTER the response is sent, so the admin
         // action returns in ~3 EU round trips instead of ~7+ log/cache writes.
-        Cache::increment('properties:search-version');
+        PropertySearchService::bumpSearchVersion();
         Cache::forget("property:detail:v2:{$property->id}");
         \App\Jobs\InvalidatePropertyCache::dispatch($property->id, $property->city)->afterResponse();
 
@@ -249,17 +250,19 @@ class VerificationController extends Controller
         }
 
         $pendingOwners = User::where('role', 'owner')->where('status', 'Pending Verification')->with('ownerVerification')->get();
-        $approvedOwners = User::where('role', 'owner')->where('status', 'Active')->get();
-        
-        $pendingLodges = Property::where('status', 'Pending')->with(['host', 'rooms', 'documents'])->get();
-        $approvedLodges = Property::where('status', 'Active')->with(['host', 'rooms', 'documents'])->get();
+        $approvedOwners = User::where('role', 'owner')->where('status', 'Active');
 
+        $pendingLodges = Property::where('status', 'Pending')->with(['host', 'rooms', 'documents'])->get();
+
+        // Only the pending lists are returned in the payload, so count the
+        // approved ones in SQL instead of hydrating every row and its
+        // relations only to call ->count() on the collection.
         return response()->json([
             'counts' => [
                 'pending_owners' => $pendingOwners->count(),
-                'approved_owners' => $approvedOwners->count(),
+                'approved_owners' => (clone $approvedOwners)->count(),
                 'pending_lodges' => $pendingLodges->count(),
-                'approved_lodges' => $approvedLodges->count(),
+                'approved_lodges' => Property::where('status', 'Active')->count(),
             ],
             'pending_owners' => $pendingOwners,
             'pending_lodges' => $pendingLodges,
