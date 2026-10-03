@@ -1,0 +1,46 @@
+name: Production smoke
+
+# Verifies the REAL backend is healthy and serving. Runs on demand and on a
+# schedule (catches a bad Railway deploy even when nobody pushed). Read-only:
+# no credentials, creates nothing, deletes nothing.
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: '17 */6 * * *'
+
+permissions:
+  contents: read
+
+jobs:
+  smoke:
+    runs-on: ubuntu-24.04
+    env:
+      BASE: ${{ vars.BACKEND_URL || 'https://api.fastnetstays.com' }}
+    steps:
+      - name: Health + public reads return 2xx/4xx (never 5xx)
+        run: |
+          FAIL=0
+          check() { # $1 path, $2 allowed codes regex
+            CODE=$(curl -s -o /dev/null -w '%{http_code}' --max-time 20 "$BASE$1")
+            if echo "$CODE" | grep -Eq "^($2)$"; then
+              echo "OK   $1 -> $CODE"
+            else
+              echo "FAIL $1 -> $CODE (want $2)"; FAIL=1
+            fi
+            if [ "$CODE" = "500" ]; then echo "FATAL $1 returned 500"; FAIL=1; fi
+          }
+          check "/up" "200"
+          check "/api/properties?per_page=1" "200"
+          check "/api/map-config" "200"
+          # Auth walls must refuse, never crash:
+          check "/api/me" "401"
+          check "/api/bookings" "401"
+          check "/api/admin/bookings" "401|403"
+          # Nonsense input must 4xx, never 500 (bigint guard):
+          check "/api/payments/status/TX-AZAM-DOESNOTEXIST" "404"
+          exit $FAIL
+
+      - name: Security headers present
+        run: |
+          H=$(curl -s -D - -o /dev/null --max-time 20 "$BASE/api/map-config")
+          echo "$H" | grep -qi "access-control-allow-origin" && echo "OK cors" || echo "WARN no CORS header"

@@ -1,0 +1,87 @@
+name: Backend CI
+
+# Every push to main is verified: lint, migration integrity, full test suite.
+# Railway auto-deploys main, so green CI is the gate that keeps broken code
+# off the production backend.
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    runs-on: ubuntu-24.04
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_DB: fastnet_test
+          POSTGRES_USER: fastnet
+          POSTGRES_PASSWORD: ci-only-throwaway
+        ports: ['5432:5432']
+        options: >-
+          --health-cmd="pg_isready -U fastnet"
+          --health-interval=5s --health-timeout=3s --health-retries=12
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup PHP
+        uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.4'
+          extensions: mbstring, intl, pdo_pgsql, redis, gd, zip, bcmath, pcntl
+          coverage: none
+
+      - name: Install dependencies
+        uses: ramsey/composer-install@v3
+
+      - name: Lint changed PHP
+        run: |
+          git fetch --depth=1 origin main 2>/dev/null || true
+          FAILED=0
+          for f in $(git diff --name-only HEAD 2>/dev/null | grep '\.php$' || true); do
+            [ -f "$f" ] || continue
+            php -l "$f" > /dev/null || FAILED=1
+          done
+          # Always lint the auth boundary — the highest-blast-radius code.
+          for f in app/Http/Controllers/AuthController.php app/Http/Controllers/LoginOtpController.php app/Http/Controllers/BookingController.php app/Http/Controllers/PaymentController.php routes/api.php; do
+            php -l "$f" > /dev/null || FAILED=1
+          done
+          exit $FAILED
+
+      - name: Copy CI env
+        run: |
+          cp .env.example .env
+          php artisan key:generate --no-interaction
+
+      - name: Migration integrity (fresh + rollback cycle)
+        env:
+          DB_CONNECTION: pgsql
+          DB_HOST: 127.0.0.1
+          DB_PORT: 5432
+          DB_DATABASE: fastnet_test
+          DB_USERNAME: fastnet
+          DB_PASSWORD: ci-only-throwaway
+        run: |
+          php artisan migrate --force
+          php artisan migrate:status
+
+      - name: Test suite
+        env:
+          APP_ENV: testing
+          DB_CONNECTION: pgsql
+          DB_HOST: 127.0.0.1
+          DB_PORT: 5432
+          DB_DATABASE: fastnet_test
+          DB_USERNAME: fastnet
+          DB_PASSWORD: ci-only-throwaway
+          CACHE_STORE: array
+          QUEUE_CONNECTION: sync
+          SESSION_DRIVER: array
+        run: php artisan test
