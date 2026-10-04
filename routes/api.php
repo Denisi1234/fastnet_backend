@@ -207,6 +207,10 @@ Route::middleware('auth:sanctum')->group(function () {
     // Cancel booking
     Route::delete('/bookings/{id}', [BookingController::class, 'cancel']);
 
+    // Professional arrival / departure (host + admin only, enforced in controller)
+    Route::post('/bookings/{id}/check-in', [BookingController::class, 'checkIn']);
+    Route::post('/bookings/{id}/check-out', [BookingController::class, 'checkOut']);
+
     // Finance & Payout Reports
     Route::get('/finance/overview', [\App\Http\Controllers\FinanceController::class, 'overview']);
     Route::get('/finance/ledger', [\App\Http\Controllers\FinanceController::class, 'ledger']);

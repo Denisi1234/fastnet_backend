@@ -441,6 +441,76 @@ class BookingController extends Controller
     }
 
     /**
+     * Professional arrival / departure flow (host + admin only).
+     *
+     * POST /bookings/{id}/check-in  — Confirmed + paid  → Checked In
+     * POST /bookings/{id}/check-out — Checked In         → Completed
+     *
+     * Guests never move these states themselves: the host confirms the
+     * physical arrival and departure. The state machine rejects anything
+     * out of order, so double check-ins and post-cancel moves 422 honestly.
+     */
+    public function checkIn(Request $request, $id)
+    {
+        return $this->moveStay($request, $id, 'Checked In');
+    }
+
+    public function checkOut(Request $request, $id)
+    {
+        return $this->moveStay($request, $id, 'Completed');
+    }
+
+    private function moveStay(Request $request, $id, string $target)
+    {
+        $user = $request->user('sanctum') ?? $request->user();
+        if (! $user) {
+            return response()->json(['message' => 'Sign in as the host to manage arrivals.'], 401);
+        }
+
+        $booking = Booking::with(['room.property'])
+            ->where(function ($q) use ($id) {
+                if (is_numeric($id)) $q->where('id', (int) $id)->orWhere('booking_code', $id);
+                else $q->where('booking_code', $id);
+            })->first();
+
+        if (! $booking) {
+            return response()->json(['message' => 'Booking not found.'], 404);
+        }
+
+        // Ownership: admins act on any stay; owners only on their own lodges.
+        if (($user->role ?? '') !== 'admin') {
+            $hostId = (int) ($booking->room->property->host_id ?? 0);
+            if ($hostId <= 0 || $hostId !== (int) $user->id) {
+                return response()->json(['message' => 'This booking belongs to another property.'], 403);
+            }
+        }
+
+        if ($target === 'Checked In' && strtolower((string) $booking->payment_status) !== 'paid') {
+            return response()->json([
+                'message' => 'Only paid bookings can be checked in.',
+                'payment_status' => $booking->payment_status,
+            ], 422);
+        }
+
+        if (! $booking->transitionTo($target)) {
+            return response()->json([
+                'message' => "Booking cannot move from {$booking->status} to {$target}.",
+                'status' => $booking->status,
+            ], 422);
+        }
+
+        if ($target === 'Completed') {
+            app(RoomAvailabilityService::class)->syncRoomOccupancy((int) $booking->room_id);
+        }
+
+        return response()->json([
+            'status' => 'success',
+            'message' => $target === 'Checked In' ? 'Guest checked in.' : 'Stay completed — guest checked out.',
+            'booking' => $booking->fresh(),
+        ]);
+    }
+
+    /**
      * Generate, GZip-compress (compressing ~80KB down to ~4KB), and upload booking e-receipt PDF to Supabase Storage 'receipts' bucket.
      * Shared endpoint called by both Mobile app and Web desktop/mobile frontends.
      */

@@ -6,6 +6,7 @@ use App\Models\Booking;
 use App\Models\Payment;
 use Illuminate\Http\Request;
 use Illuminate\Support\Str;
+use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Http;
 use Illuminate\Support\Facades\Log;
@@ -112,10 +113,16 @@ class PaymentController extends Controller
         $azampayClientId = env('AZAMPAY_CLIENT_ID');
         $azampaySecret = env('AZAMPAY_CLIENT_SECRET');
         $azampayToken  = env('AZAMPAY_TOKEN');
+        // Sandbox API consumption requires the X-API-Key request header alongside
+        // the Bearer token (official flow: GetToken, then every API call carries
+        // both). Without it MNO checkout 401s even with a valid token.
+        $azampayApiKey = env('AZAMPAY_API_KEY');
 
         $isProd = strtolower((string)$azampayEnv) === 'production' || strtolower((string)$azampayEnv) === 'prod';
-        // Correct sandbox auth URL — authenticator-sandbox subdomain returns 401; sandbox.azampay.co.tz/AppLink/GetToken is correct
-        $authUrl = $isProd ? 'https://authenticator.azampay.co.tz/Applink/GetToken' : 'https://sandbox.azampay.co.tz/AppLink/GetToken';
+        // Official token endpoint (developerdocs.azampay.co.tz/tanzania):
+        // POST {authenticator}/AppRegistration/GenerateToken. The old
+        // /AppLink/GetToken path answers 401/404 for every credential.
+        $authUrl = $isProd ? 'https://authenticator.azampay.co.tz/AppRegistration/GenerateToken' : 'https://authenticator-sandbox.azampay.co.tz/AppRegistration/GenerateToken';
         $mnoUrl  = $isProd ? 'https://checkout.azampay.co.tz/azampay/mno/checkout' : 'https://sandbox.azampay.co.tz/azampay/mno/checkout';
         // $providerName was already correctly resolved from the request above — do NOT overwrite it here
 
@@ -134,32 +141,29 @@ class PaymentController extends Controller
                 $token = $azampayToken;
 
                 if (!$token && $azampayClientId && $azampaySecret) {
-                    // Request Bearer Token from AzamPay Authenticator
-                    $authRes = Http::withoutVerifying()->timeout(10)->post($authUrl, [
-                        'appName'      => $azampayApp,
-                        'clientId'     => $azampayClientId,
-                        'clientSecret' => $azampaySecret,
-                    ]);
-
-                    if ($authRes->successful() && isset($authRes['data']['accessToken'])) {
-                        $token = $authRes['data']['accessToken'];
-                    } else {
-                        Log::warning('AzamPay Token Auth Failed', ['status' => $authRes->status(), 'body' => $authRes->body()]);
-                    }
+                    $token = $this->azamAccessToken($authUrl, $azampayApp, $azampayClientId, $azampaySecret);
                 }
 
                 if ($token) {
                     if (empty($formattedPhone)) {
                         return response()->json(['message' => 'Phone number is required for mobile money checkout.'], 422);
                     }
-                    // Send MNO Checkout Request to official AzamPay endpoint
-                    $mnoRes = Http::withoutVerifying()->withToken($token)->timeout(15)->post($mnoUrl, [
-                        'accountNumber' => $formattedPhone,
-                        'amount'        => (string) round($authoritativeAmount),
-                        'currency'      => $currency,
-                        'externalId'    => $booking->booking_code,
-                        'provider'      => $providerName,
-                    ]);
+                    // Send MNO Checkout Request to official AzamPay endpoint.
+                    // Amount goes as a JSON number per spec (numeric only).
+                    $mnoAmount = (int) round($authoritativeAmount);
+                    $mnoRes = $this->azamMnoCheckout($mnoUrl, $token, $formattedPhone, $mnoAmount, $currency, $booking->booking_code, $providerName, $azampayApiKey);
+
+                    if ($mnoRes->status() === 401 && $azampayClientId && $azampaySecret) {
+                        // Static AZAMPAY_TOKEN goes stale: AzamPay rejects it and
+                        // every push silently dies. Mint a fresh token and retry
+                        // the push exactly once before giving up.
+                        Log::warning('AzamPay token rejected (401) — refreshing and retrying once.');
+                        $fresh = $this->azamAccessToken($authUrl, $azampayApp, $azampayClientId, $azampaySecret);
+                        if ($fresh && $fresh !== $token) {
+                            $token = $fresh;
+                            $mnoRes = $this->azamMnoCheckout($mnoUrl, $token, $formattedPhone, $mnoAmount, $currency, $booking->booking_code, $providerName, $azampayApiKey);
+                        }
+                    }
 
                     Log::info('AzamPay MNO Checkout Dispatched', [
                         'status'   => $mnoRes->status(),
@@ -187,6 +191,97 @@ class PaymentController extends Controller
             'status'         => 'pending',
             'gateway'        => 'AzamPay (' . $providerName . ')',
         ], 200);
+    }
+
+    /**
+     * Mint an AzamPay access token via the authenticator. Returns null when
+     * the credentials are rejected or the endpoint is unreachable — callers
+     * decide whether to skip or retry. Never throws.
+     */
+    private function azamAccessToken(string $authUrl, string $app, string $clientId, string $clientSecret): ?string
+    {
+        try {
+            $authRes = Http::withoutVerifying()->timeout(10)->post($authUrl, [
+                'appName'      => $app,
+                'clientId'     => $clientId,
+                'clientSecret' => $clientSecret,
+            ]);
+            if ($authRes->successful() && isset($authRes['data']['accessToken'])) {
+                return (string) $authRes['data']['accessToken'];
+            }
+            Log::warning('AzamPay Token Auth Failed', ['status' => $authRes->status(), 'body' => substr($authRes->body(), 0, 300)]);
+        } catch (\Exception $e) {
+            Log::warning('AzamPay Token Auth Exception: ' . $e->getMessage());
+        }
+        return null;
+    }
+
+    /**
+     * Fire one AzamPay MNO (USSD push) checkout. Never throws — HTTP client
+     * exceptions bubble to the caller, which logs them.
+     */
+    private function azamMnoCheckout(string $mnoUrl, string $token, string $phone, int $amount, string $currency, string $externalId, string $provider, ?string $apiKey = null)
+    {
+        $req = Http::withoutVerifying()->withToken($token);
+        // Optional vendor header (kept for compatibility; the official
+        // Tanzania checkout spec authenticates with the Bearer token only).
+        if ($apiKey !== null && trim($apiKey) !== '') {
+            $req = $req->withHeaders(['X-API-Key' => trim($apiKey)]);
+        }
+        return $req->timeout(15)->post($mnoUrl, [
+            'accountNumber' => $phone,
+            'amount'        => $amount,
+            'currency'      => $currency,
+            'externalId'    => $externalId,
+            'provider'      => $provider,
+        ]);
+    }
+
+    /**
+     * Verify an AzamPay callback RSA signature (SHA-256, PKCS#1 v1.5) over
+     * {utilityref}{externalreference}{transactionstatus}{operator}.
+     * The public key is fetched once per 24h from /azampay/v1/public-key.
+     */
+    private function azamCallbackSignatureValid(string $utilityRef, string $externalReference, string $transactionStatus, string $operator, string $signatureB64): bool
+    {
+        if (!function_exists('openssl_verify')) return false;
+        $pem = $this->azamCallbackPublicKey();
+        if ($pem === null) return false;
+        $key = @openssl_pkey_get_public($pem);
+        if ($key === false) return false;
+        $sig = base64_decode($signatureB64, true);
+        if ($sig === false) return false;
+        return openssl_verify($utilityRef . $externalReference . $transactionStatus . $operator, $sig, $key, OPENSSL_ALGO_SHA256) === 1;
+    }
+
+    private function azamCallbackPublicKey(): ?string
+    {
+        try {
+            $cached = Cache::get('azampay_callback_pubkey');
+            if (is_string($cached) && str_contains($cached, 'BEGIN PUBLIC KEY')) return $cached;
+        } catch (\Exception $e) {
+        }
+        $azampayEnv = env('AZAMPAY_ENV', 'sandbox');
+        $isProd = strtolower((string) $azampayEnv) === 'production' || strtolower((string) $azampayEnv) === 'prod';
+        $authUrl = $isProd ? 'https://authenticator.azampay.co.tz/AppRegistration/GenerateToken' : 'https://authenticator-sandbox.azampay.co.tz/AppRegistration/GenerateToken';
+        $host = $isProd ? 'https://checkout.azampay.co.tz' : 'https://sandbox.azampay.co.tz';
+        $token = $this->azamAccessToken($authUrl, (string) env('AZAMPAY_APP_NAME', 'FastNetStays'), (string) env('AZAMPAY_CLIENT_ID', ''), (string) env('AZAMPAY_CLIENT_SECRET', ''));
+        if (!$token) return null;
+        try {
+            $res = Http::withoutVerifying()->withToken($token)->timeout(10)->get($host . '/azampay/v1/public-key', ['format' => 'Pem']);
+            $pem = $res->successful() ? (string) ($res['publicKey'] ?? '') : '';
+            if (str_contains($pem, 'BEGIN PUBLIC KEY')) {
+                try {
+                    Cache::put('azampay_callback_pubkey', $pem, now()->addHours(24));
+                } catch (\Exception $e) {
+                }
+                return $pem;
+            }
+            Log::warning('AzamPay public-key fetch failed', ['status' => $res->status()]);
+        } catch (\Exception $e) {
+            Log::warning('AzamPay public-key fetch exception: ' . $e->getMessage());
+        }
+        return null;
     }
 
     /**
@@ -230,6 +325,26 @@ class PaymentController extends Controller
                 'message' => 'Unrecognised transaction status.',
                 'received_status' => $rawStatus,
             ], 422);
+        }
+
+        // RSA callback signature (official spec): verified when AzamPay signs
+        // the callback over the RAW field values as received. Unsigned
+        // callbacks are processed with a warning (sandbox compatibility).
+        $cbSignature = $request->input('signature');
+        if (is_string($cbSignature) && trim($cbSignature) !== '') {
+            $sigOk = $this->azamCallbackSignatureValid(
+                (string) ($request->input('utilityref') ?? ''),
+                (string) ($request->input('externalreference') ?? ''),
+                (string) ($request->input('transactionstatus') ?? $request->input('status') ?? ''),
+                (string) ($request->input('operator') ?? ''),
+                trim($cbSignature)
+            );
+            if (!$sigOk) {
+                Log::error("AzamPay webhook signature INVALID for {$bookingCode}. Rejected — booking untouched.");
+                return response()->json(['message' => 'Invalid callback signature.'], 422);
+            }
+        } else {
+            Log::warning("AzamPay webhook for {$bookingCode} carried no signature — processed without verification.");
         }
 
         if (!$bookingCode) {
