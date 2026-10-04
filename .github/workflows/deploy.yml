@@ -1,0 +1,30 @@
+# Auto-deploy to the Contabo VPS (161.97.154.131) on every push to main.
+# Rebuilds backend + worker + scheduler; migrations run in the entrypoint.
+# The VPS key in secrets.VPS_DEPLOY_KEY is locked server-side to a forced
+# command (fastnet-deploy-gate): it can only trigger "web" or "backend"
+# deploys — no shell, no forwarding.
+name: Deploy to VPS
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: deploy-vps-backend
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Deploy backend to VPS
+        env:
+          SSH_KEY: ${{ secrets.VPS_DEPLOY_KEY }}
+        run: |
+          mkdir -p ~/.ssh
+          printf '%s\n' "$SSH_KEY" > ~/.ssh/deploy_key
+          chmod 600 ~/.ssh/deploy_key
+          echo "161.97.154.131 ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIPrgqvU1urEUB/Lbjh/BOYwNxTkWqvSn9/y2rl6SNxrG" > ~/.ssh/known_hosts
+          ssh -i ~/.ssh/deploy_key -o IdentitiesOnly=yes -o ServerAliveInterval=30 root@161.97.154.131 backend
