@@ -56,12 +56,16 @@ class PaymentIntegrationTest extends TestCase
             'total_inventory' => 2,
         ]);
 
-        // Create booking with authoritative price: 200,000 * 2 nights + 18% VAT (72,000) = 472,000 TZS
+        // Create booking with authoritative price: 200,000 * 2 nights + 18% VAT (72,000) = 472,000 TZS.
+        // Dates are relative to today — hardcoded dates rotted into the past
+        // and tripped the "check_in must be after or equal to today" rule.
+        $checkIn = now()->addDays(5)->toDateString();
+        $checkOut = now()->addDays(7)->toDateString();
         $this->booking = Booking::create([
             'room_id' => $this->room->id,
             'guest_id' => $this->guest->id,
-            'check_in' => '2026-10-01',
-            'check_out' => '2026-10-03',
+            'check_in' => $checkIn,
+            'check_out' => $checkOut,
             'total_price' => 472000.00,
             'status' => 'Pending',
             'payment_status' => 'pending',

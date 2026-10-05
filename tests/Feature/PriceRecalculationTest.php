@@ -57,11 +57,13 @@ class PriceRecalculationTest extends TestCase
 
     public function test_checkout_ignores_frontend_tampered_price()
     {
-        // Frontend attempts to submit price = 1 TZS (tampered price attack)
+        // Frontend attempts to submit price = 1 TZS (tampered price attack).
+        // Dates are relative to today — hardcoded dates rotted into the past
+        // and tripped the "check_in must be after or equal to today" rule.
         $tamperedPayload = [
             'room_id' => $this->room->id,
-            'check_in' => '2026-09-01',
-            'check_out' => '2026-09-04', // 3 nights
+            'check_in' => now()->addDays(5)->toDateString(),
+            'check_out' => now()->addDays(8)->toDateString(), // 3 nights
             'quantity' => 1,
             'guests' => 2,
             'price' => 1.00,
