@@ -55,27 +55,29 @@ class PaymentController extends Controller
 
         $gatewayRaw = $request->input('payment_method') ?? $request->input('gateway') ?? 'AzamPay M-Pesa';
         $phoneNumber = $request->input('phone_number') ?? $request->input('phone');
-        // Strict provider allowlist — no silent fallback to Mpesa (UI already validates, backend is authoritative)
+        // Strict provider allowlist — no silent fallback to Mpesa (UI already validates, backend is authoritative).
+        // Matching runs on a separator-stripped form so legacy strings like
+        // "AzamPay M-Pesa" (hyphen!) resolve exactly like "mpesa" — the old
+        // raw contains-check could never see past the hyphen and 422'd real
+        // checkouts, including this controller's own default gateway.
         $lowerGateway = strtolower(trim((string)$gatewayRaw));
+        $flatGateway = (string) preg_replace('/[^a-z0-9]/', '', $lowerGateway);
         $providerMap = [
-            'mpesa' => 'Mpesa', 'vodacom' => 'Mpesa', 'm-pesa' => 'Mpesa', 'vodacom mpesa' => 'Mpesa',
-            'tigo' => 'Tigo', 'tigopesa' => 'Tigo', 'tigo pesa' => 'Tigo',
-            'airtel' => 'Airtel', 'airtelmoney' => 'Airtel', 'airtel money' => 'Airtel',
-            'halotel' => 'Halopesa', 'halopesa' => 'Halopesa', 'halo pesa' => 'Halopesa',
-            'card' => 'Card', 'credit' => 'Card', 'credit_card' => 'Card', 'visa' => 'Card', 'mastercard' => 'Card',
+            'mpesa' => 'Mpesa', 'vodacom' => 'Mpesa', 'vodacommpesa' => 'Mpesa',
+            'azampaympesa' => 'Mpesa',
+            'tigo' => 'Tigo', 'tigopesa' => 'Tigo',
+            'airtel' => 'Airtel', 'airtelmoney' => 'Airtel',
+            'halotel' => 'Halopesa', 'halopesa' => 'Halopesa',
+            'card' => 'Card', 'credit' => 'Card', 'creditcard' => 'Card', 'visa' => 'Card', 'mastercard' => 'Card',
         ];
-        if (!isset($providerMap[$lowerGateway]) && !str_contains($lowerGateway, 'tigo') && !str_contains($lowerGateway, 'airtel') && !str_contains($lowerGateway, 'halo') && !str_contains($lowerGateway, 'mpesa') && !str_contains($lowerGateway, 'vodacom') && $lowerGateway !== 'card') {
-            // Check contains for legacy gateway strings like "AzamPay M-Pesa"
-            if (str_contains($lowerGateway, 'tigo')) $providerName = 'Tigo';
-            elseif (str_contains($lowerGateway, 'airtel')) $providerName = 'Airtel';
-            elseif (str_contains($lowerGateway, 'halo')) $providerName = 'Halopesa';
-            elseif (str_contains($lowerGateway, 'mpesa') || str_contains($lowerGateway, 'vodacom')) $providerName = 'Mpesa';
-            elseif ($lowerGateway === 'card') $providerName = 'Card';
+        $providerName = $providerMap[$flatGateway] ?? null;
+        if ($providerName === null) {
+            if (str_contains($flatGateway, 'tigo')) $providerName = 'Tigo';
+            elseif (str_contains($flatGateway, 'airtel')) $providerName = 'Airtel';
+            elseif (str_contains($flatGateway, 'halo')) $providerName = 'Halopesa';
+            elseif (str_contains($flatGateway, 'mpesa') || str_contains($flatGateway, 'vodacom')) $providerName = 'Mpesa';
+            elseif ($flatGateway === 'card') $providerName = 'Card';
             else return response()->json(['message' => 'Unsupported payment provider: ' . $gatewayRaw], 422);
-        } else {
-            $providerName = $providerMap[$lowerGateway] ?? 'Mpesa';
-            // Handle contains fallback for card
-            if ($lowerGateway === 'card') $providerName = 'Card';
         }
         if ($providerName === 'Card') {
             return response()->json(['message' => 'Card payments are processed via secure card gateway — not AzamPay MNO. Use /payments/card/checkout.'], 422);
