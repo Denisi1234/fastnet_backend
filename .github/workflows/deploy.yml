@@ -24,7 +24,16 @@ jobs:
           SSH_KEY: ${{ secrets.VPS_DEPLOY_KEY }}
         run: |
           mkdir -p ~/.ssh
-          printf '%s\n' "$SSH_KEY" > ~/.ssh/deploy_key
+          # Strip CR so a secret pasted from Windows/PuTTY still parses.
+          printf '%s\n' "$SSH_KEY" | tr -d '\r' > ~/.ssh/deploy_key
           chmod 600 ~/.ssh/deploy_key
+          # Fail fast with a clear message when the secret is not a parseable
+          # private key (this used to surface as cryptic "error in libcrypto"
+          # + password prompts). BatchMode below disables password fallback so
+          # a key mismatch fails immediately instead of hanging on auth.
+          if ! ssh-keygen -y -f ~/.ssh/deploy_key </dev/null >/dev/null 2>&1; then
+            echo "::error::VPS_DEPLOY_KEY is not a valid private key. Paste the FULL private key text (BEGIN..END lines, no passphrase) into the repo secret and re-run."
+            exit 1
+          fi
           echo "161.97.154.131 ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIPrgqvU1urEUB/Lbjh/BOYwNxTkWqvSn9/y2rl6SNxrG" > ~/.ssh/known_hosts
-          ssh -i ~/.ssh/deploy_key -o IdentitiesOnly=yes -o ServerAliveInterval=30 root@161.97.154.131 backend
+          ssh -i ~/.ssh/deploy_key -o IdentitiesOnly=yes -o BatchMode=yes -o ConnectTimeout=30 -o ServerAliveInterval=30 root@161.97.154.131 backend
