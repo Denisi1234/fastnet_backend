@@ -569,10 +569,14 @@ class AdminController extends Controller
             return $aggregates;
         }
 
+        // Alias the aggregate: pluck(DB::raw('COUNT(*)')) looks up a result
+        // property literally named "COUNT(*)", but Postgres returns it as
+        // "count" — every owners financial-summary call 500'd.
         $propertyCounts = DB::table('properties')
             ->whereIn('host_id', $hostIds)
             ->groupBy('host_id')
-            ->pluck(DB::raw('COUNT(*)'), 'host_id');
+            ->selectRaw('host_id, COUNT(*) as property_count')
+            ->pluck('property_count', 'host_id');
 
         foreach ($propertyCounts as $hostId => $count) {
             $aggregates[(int) $hostId]['property_count'] = (int) $count;
@@ -738,8 +742,25 @@ class AdminController extends Controller
             return response()->json(['message' => 'Unauthorized. Admin role required.'], 403);
         }
 
-        $properties = Property::with(['host', 'rooms'])->orderBy('created_at', 'desc')->get();
-        return response()->json($properties);
+        // Honor the admin page filters (previously ignored, so "Pending" still
+        // listed everything) and skip hydrating every room: the list only
+        // needs a count. Response stays a plain array for existing callers.
+        $query = Property::with('host')->withCount('rooms')->orderBy('created_at', 'desc');
+
+        $status = trim((string) $request->input('status', ''));
+        if ($status !== '') {
+            $query->whereRaw('LOWER(status) = ?', [strtolower($status)]);
+        }
+
+        $search = trim((string) $request->input('search', ''));
+        if ($search !== '') {
+            $query->where(function ($q) use ($search) {
+                $q->where('name', 'ILIKE', "%{$search}%")
+                  ->orWhere('city', 'ILIKE', "%{$search}%");
+            });
+        }
+
+        return response()->json($query->limit(200)->get());
     }
 
     /**
