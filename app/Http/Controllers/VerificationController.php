@@ -226,9 +226,15 @@ class VerificationController extends Controller
         // Bust caches so approval is visible immediately (detail + search).
         // Heavy invalidation runs AFTER the response is sent, so the admin
         // action returns in ~3 EU round trips instead of ~7+ log/cache writes.
-        PropertySearchService::bumpSearchVersion();
-        Cache::forget("property:detail:v2:{$property->id}");
-        \App\Jobs\InvalidatePropertyCache::dispatch($property->id, $property->city)->afterResponse();
+        // Best-effort: a redis/queue hiccup here previously turned the whole
+        // approval into a 500 even though the status had already saved.
+        try {
+            PropertySearchService::bumpSearchVersion();
+            Cache::forget("property:detail:v2:{$property->id}");
+            \App\Jobs\InvalidatePropertyCache::dispatch($property->id, $property->city)->afterResponse();
+        } catch (\Throwable $e) {
+            \Illuminate\Support\Facades\Log::warning('Lodge review cache bust failed: '.$e->getMessage());
+        }
 
         // Audit Trail Entry
         VerificationRequest::create([
