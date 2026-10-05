@@ -105,7 +105,14 @@ class VerificationController extends Controller
             'status' => 'required|string|in:approved,rejected,changes_requested,suspended',
             'reason' => 'nullable|string',
             'admin_notes' => 'nullable|string',
+            'notes' => 'nullable|string',
         ]);
+
+        // Clients send the reason under different keys (reason / admin_notes /
+        // notes) — accept any of them so a decision is never lost to a key
+        // mismatch. Canonical keys win when several are present.
+        $reason = $request->reason ?? $request->admin_notes ?? $request->notes;
+        $adminNotes = $request->admin_notes ?? $request->reason ?? $request->notes;
 
         $owner = User::findOrFail($ownerId);
         $verification = OwnerVerification::where('user_id', $ownerId)->first();
@@ -113,7 +120,7 @@ class VerificationController extends Controller
         if ($verification) {
             $verification->update([
                 'status' => $request->status,
-                'admin_notes' => $request->admin_notes,
+                'admin_notes' => $adminNotes,
                 'reviewed_at' => now(),
                 'reviewed_by' => $request->user()->id,
             ]);
@@ -132,8 +139,8 @@ class VerificationController extends Controller
             'entity_id' => $ownerId,
             'submitted_by' => $ownerId,
             'status' => $request->status,
-            'reason' => $request->reason,
-            'admin_notes' => $request->admin_notes,
+            'reason' => $reason,
+            'admin_notes' => $adminNotes,
             'reviewer_id' => $request->user()->id,
             'reviewed_at' => now(),
         ]);
@@ -207,7 +214,11 @@ class VerificationController extends Controller
             'status' => 'required|string|in:Active,Pending,Removed,changes_requested,rejected',
             'reason' => 'nullable|string',
             'admin_notes' => 'nullable|string',
+            'notes' => 'nullable|string',
         ]);
+
+        $reason = $request->reason ?? $request->admin_notes ?? $request->notes;
+        $adminNotes = $request->admin_notes ?? $request->reason ?? $request->notes;
 
         $property = Property::findOrFail($propertyId);
         $property->update(['status' => $request->status]);
@@ -225,8 +236,8 @@ class VerificationController extends Controller
             'entity_id' => $propertyId,
             'submitted_by' => $property->host_id,
             'status' => strtolower($request->status),
-            'reason' => $request->reason,
-            'admin_notes' => $request->admin_notes,
+            'reason' => $reason,
+            'admin_notes' => $adminNotes,
             'reviewer_id' => $request->user()->id,
             'reviewed_at' => now(),
         ]);

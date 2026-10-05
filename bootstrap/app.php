@@ -1,5 +1,6 @@
 <?php
 
+use Illuminate\Auth\AuthenticationException;
 use Illuminate\Database\QueryException;
 use Illuminate\Foundation\Application;
 use Illuminate\Foundation\Configuration\Exceptions;
@@ -24,6 +25,14 @@ return Application::configure(basePath: dirname(__DIR__))
         // receives traffic from the platform's own routing layer.
         $middleware->trustProxies(at: '*');
 
+        // API-only backend: there is no web login page, so the framework
+        // default guest redirect (route('login')) explodes with
+        // "Route [login] not defined" (HTTP 500) on every unauthenticated API
+        // call. Redirect nowhere instead — unauthenticated API calls become a
+        // clean 401 JSON. This was the blanket 500 behind every dead
+        // admin-portal button.
+        $middleware->redirectGuestsTo(fn () => null);
+
         // Registered unconditionally: the shim disables itself in production
         // from inside handle(), where the container is fully built. It cannot
         // be gated here — this closure runs before base bindings exist, so any
@@ -34,6 +43,17 @@ return Application::configure(basePath: dirname(__DIR__))
         $exceptions->shouldRenderJsonWhen(
             fn (Request $request) => $request->is('api/*'),
         );
+
+        // API has no web login page, so the framework default of redirecting
+        // guests to route('login') explodes with "Route [login] not defined"
+        // (HTTP 500) on every unauthenticated API call that does not send
+        // Accept: application/json. Answer 401 JSON for all of api/* instead.
+        // This was the blanket 500 behind every dead admin-portal button.
+        $exceptions->render(function (AuthenticationException $e, Request $request) {
+            if ($request->is('api/*')) {
+                return response()->json(['message' => 'Unauthenticated.'], 401);
+            }
+        });
 
         // A database failure must never reach the browser as a PDO message.
         // The raw text discloses the host, port, database name, table and
