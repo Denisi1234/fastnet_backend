@@ -18,6 +18,7 @@ use Illuminate\Support\Str;
 use App\Services\BookingCalculationService;
 use App\Services\BookingCreationService;
 use App\Services\BookingRevalidationService;
+use App\Services\BookingVerifyService;
 use App\Services\ReceiptGenerationService;
 use App\Services\RoomAvailabilityService;
 
@@ -240,6 +241,13 @@ class BookingController extends Controller
 
         $bookings = $query->latest()->paginate($perPage);
 
+        // Signed QR verification URL for printed confirmations.
+        $signer = app(BookingVerifyService::class);
+        $bookings->getCollection()->transform(function ($b) use ($signer) {
+            $b->verify_url = $signer->verifyUrl($b->booking_code);
+            return $b;
+        });
+
         return response()->json($bookings);
     }
 
@@ -378,7 +386,48 @@ class BookingController extends Controller
             return response()->json(['message' => 'Booking not found.'], 404);
         }
 
+        // Signed QR verification URL for printed confirmations.
+        $booking->verify_url = app(BookingVerifyService::class)->verifyUrl($booking->booking_code);
+
         return response()->json($booking);
+    }
+
+    /**
+     * Public receipt-QR verification. The HMAC signature is the auth, so
+     * this stays login-free (staff scan with any phone camera). Always
+     * 200 with a `valid` flag so the web page renders one uniform state;
+     * the payload mirrors the printed receipt only — no guest contact
+     * details, no payment internals.
+     */
+    public function verify(Request $request)
+    {
+        $code = trim((string) ($request->query('code') ?? ''));
+        $sig = trim((string) ($request->query('s') ?? ''));
+        $signer = app(BookingVerifyService::class);
+
+        if (! $signer->check($code, $sig)) {
+            return response()->json([
+                'valid' => false,
+                'message' => 'This confirmation could not be verified. It may be forged, altered, or mistyped.',
+            ]);
+        }
+
+        $booking = Booking::with(['room.property', 'guest'])
+            ->where('booking_code', $code)
+            ->first();
+
+        if (! $booking) {
+            return response()->json([
+                'valid' => false,
+                'message' => 'No booking matches this confirmation.',
+            ]);
+        }
+
+        return response()->json([
+            'valid' => true,
+            'verified_at' => now()->toIso8601String(),
+            'booking' => $signer->slimPayload($booking),
+        ]);
     }
 
     public function cancel(Request $request, $id)

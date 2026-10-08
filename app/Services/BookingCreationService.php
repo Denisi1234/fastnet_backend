@@ -136,6 +136,7 @@ class BookingCreationService
                     'message'      => 'Booking initialized successfully.',
                     'booking'      => $booking,
                     'booking_code' => $booking->booking_code,
+                    'verify_url'   => (new BookingVerifyService())->verifyUrl($booking->booking_code),
                     'currency'     => $calc['currency'],
                     'nights'       => $calc['nights'],
                     'guests'       => $calc['guests'],

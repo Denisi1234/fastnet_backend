@@ -102,6 +102,8 @@ Route::get('/bookings/revalidate', [BookingController::class, 'revalidate']);
 Route::post('/bookings/revalidate', [BookingController::class, 'revalidate']);
 Route::post('/bookings/create', [BookingController::class, 'store']);
 Route::get('/bookings', [BookingController::class, 'index']);
+// Registered before /bookings/{id} so "verify" is not captured as an id.
+Route::get('/bookings/verify', [BookingController::class, 'verify']);
 Route::get('/bookings/{id}', [BookingController::class, 'show']);
 Route::delete('/bookings/{id}', [BookingController::class, 'cancel']);
 

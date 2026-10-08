@@ -52,9 +52,10 @@ class ReceiptGenerationService
                 'total_price' => $totalPrice,
                 'guest_preferences' => $guestPreferences,
                 'issued_at' => date('Y-m-d H:i:s'),
-                // Room came from the booking. It was hardcoded to ROOM:1, so every
-                // receipt QR pointed at room 1 regardless of the actual stay.
-                'qr_payload' => "FASTNETSTAYS-BOOKING:{$bookingCode}|LODGE:{$propertyName}|ROOM:{$roomNumber}|GUEST:" . strtoupper($guestName),
+                // Signed verification URL any phone camera can open. Callers
+                // may pass a precomputed verify_url; otherwise sign here so
+                // emailed receipts carry the same live QR as the app.
+                'qr_payload' => $data['verify_url'] ?? (new BookingVerifyService())->verifyUrl($bookingCode),
             ];
             $rawBytes = json_encode($receiptData, JSON_PRETTY_PRINT);
         }
