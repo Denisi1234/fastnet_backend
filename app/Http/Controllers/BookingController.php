@@ -345,7 +345,7 @@ class BookingController extends Controller
     {
         $user = $request->user('sanctum') ?? $request->user();
 
-        $query = Booking::with(['room.property', 'guest', 'payments'])
+        $query = Booking::with(['room.property.host:id,name', 'guest', 'payments'])
             ->where(function ($q) use ($id) {
                 if (is_numeric($id)) {
                     $q->where('id', (int) $id)->orWhere('booking_code', $id);
@@ -487,6 +487,83 @@ class BookingController extends Controller
         app(\App\Services\BookingNotificationService::class)->notifyCancelled($booking);
 
         return response()->json(['status' => 'success', 'message' => 'Booking cancelled successfully.', 'booking' => $booking->fresh()]);
+    }
+
+    /**
+     * Guest/host date change (quote → apply). Ownership mirrors cancel():
+     * signed-in guest owns it, hosts act on their lodges, admins on anything,
+     * or email self-service. Finished stays (cancelled/completed/checked-in)
+     * cannot move.
+     *
+     * @return array{0:Booking|null,1:\Illuminate\Http\JsonResponse|null}
+     */
+    private function findMovableBooking(Request $request, $id): array
+    {
+        $user = $request->user('sanctum') ?? $request->user();
+        $email = $request->input('email') ?? $request->query('email');
+
+        if (! $user && ! $email) {
+            return [null, response()->json([
+                'message' => 'Sign in to manage this booking, or supply the email used to make it.',
+            ], 401)];
+        }
+
+        $query = Booking::with(['room.property'])->where(function ($q) use ($id) {
+            if (is_numeric($id)) $q->where('id', (int) $id)->orWhere('booking_code', $id);
+            else $q->where('booking_code', $id);
+        });
+
+        if ($user && $user->role !== 'admin') {
+            if (($user->role ?? '') === 'owner') {
+                $query->whereHas('room.property', fn ($q) => $q->where('host_id', $user->id));
+            } else {
+                $query->where('guest_id', $user->id);
+            }
+        } elseif (! $user && $email) {
+            $query->whereHas('guest', fn ($q) => $q->where('email', $email));
+        }
+
+        $booking = $query->first();
+
+        if (! $booking) {
+            return [null, response()->json(['message' => 'Booking not found.'], 404)];
+        }
+
+        if (in_array(strtolower((string) $booking->status), ['cancelled', 'completed', 'checked in', 'checked_in'])) {
+            return [null, response()->json([
+                'message' => "Booking cannot be changed from {$booking->status}.",
+            ], 422)];
+        }
+
+        return [$booking, null];
+    }
+
+    public function rescheduleQuote(Request $request, $id, \App\Services\BookingRescheduleService $rescheduler)
+    {
+        $request->validate([
+            'check_in' => 'required|date',
+            'check_out' => 'required|date|after:check_in',
+        ]);
+
+        [$booking, $error] = $this->findMovableBooking($request, $id);
+        if ($error) return $error;
+
+        $res = $rescheduler->quote($booking, $request->check_in, $request->check_out);
+        return response()->json($res['data'], $res['status']);
+    }
+
+    public function reschedule(Request $request, $id, \App\Services\BookingRescheduleService $rescheduler)
+    {
+        $request->validate([
+            'check_in' => 'required|date',
+            'check_out' => 'required|date|after:check_in',
+        ]);
+
+        [$booking, $error] = $this->findMovableBooking($request, $id);
+        if ($error) return $error;
+
+        $res = $rescheduler->apply($booking, $request->check_in, $request->check_out);
+        return response()->json($res['data'], $res['status']);
     }
 
     /**

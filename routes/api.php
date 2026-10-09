@@ -106,6 +106,9 @@ Route::get('/bookings', [BookingController::class, 'index']);
 Route::get('/bookings/verify', [BookingController::class, 'verify']);
 Route::get('/bookings/{id}', [BookingController::class, 'show']);
 Route::delete('/bookings/{id}', [BookingController::class, 'cancel']);
+// Real date changes (quote → apply). POST paths never collide with GET {id}.
+Route::post('/bookings/{id}/reschedule/quote', [BookingController::class, 'rescheduleQuote']);
+Route::post('/bookings/{id}/reschedule', [BookingController::class, 'reschedule']);
 
 // AzamPay Payment gateway routes (Public)
 Route::post('/payments/checkout', [PaymentController::class, 'checkout']);

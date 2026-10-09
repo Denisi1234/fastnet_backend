@@ -44,6 +44,10 @@ class BookingNotificationService
         $this->toGuest($booking, new BookingCancelled($booking->id));
     }
 
+    public function notifyRescheduled(Booking $booking, string $from, string $to): void
+    {
+        $this->toGuest($booking, new BookingRescheduled($booking->id, $from, $to));
+    }
     public function notifyCompleted(Booking $booking): void
     {
         $this->toGuest($booking, new BookingCompleted($booking->id));
