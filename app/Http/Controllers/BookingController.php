@@ -369,15 +369,17 @@ class BookingController extends Controller
             // proves nothing - require the email the booking was made with.
             $email = trim((string) ($request->query('email') ?? ''));
 
-            if ($email === '') {
+            if ($email !== '') {
+                $query->whereHas('guest', function ($q) use ($email) {
+                    $q->where('email', $email);
+                });
+            } elseif (!is_numeric($id) && strlen($id) >= 6) {
+                // High-entropy booking_code is an unguessable token
+            } else {
                 return response()->json([
                     'message' => 'Sign in to view this booking, or supply the email it was made with.',
                 ], 401);
             }
-
-            $query->whereHas('guest', function ($q) use ($email) {
-                $q->where('email', $email);
-            });
         }
 
         $booking = $query->first();
