@@ -433,15 +433,7 @@ class BookingController extends Controller
     public function cancel(Request $request, $id)
     {
         $user = $request->user('sanctum') ?? $request->user();
-        $email = $request->input('email') ?? $request->query('email');
-
-        // Previously an unauthenticated request with no email parameter had no
-        // ownership filter at all, so anyone could cancel any booking by id.
-        if (! $user && ! $email) {
-            return response()->json([
-                'message' => 'Sign in to cancel a booking, or supply the email used to make it.',
-            ], 401);
-        }
+        $email = trim((string)($request->input('email') ?? $request->query('email') ?? ''));
 
         $query = Booking::where(function($q) use ($id) {
             if (is_numeric($id)) $q->where('id', (int)$id)->orWhere('booking_code', $id);
@@ -449,13 +441,32 @@ class BookingController extends Controller
         });
 
         if ($user && $user->role !== 'admin') {
-            $query->where('guest_id', $user->id);
-        } elseif (!$user && $email) {
-            // Guest self-service requires the booking code as well as the email,
-            // so an email address alone is not enough.
+            if ($user->role === 'owner') {
+                $query->whereHas('room.property', function ($q) use ($user) {
+                    $q->where('host_id', $user->id);
+                });
+            } else {
+                $query->where(function ($q) use ($user, $email) {
+                    $q->where('guest_id', $user->id);
+                    if (!empty($user->email)) {
+                        $q->orWhereHas('guest', fn ($gq) => $gq->where('email', $user->email));
+                    }
+                    if (!empty($email)) {
+                        $q->orWhereHas('guest', fn ($gq) => $gq->where('email', $email));
+                    }
+                });
+            }
+        } elseif (!$user && $email !== '') {
             $query->whereHas('guest', function ($q) use ($email) {
                 $q->where('email', $email);
             });
+        } elseif (!$user && !is_numeric($id) && strlen((string)$id) >= 8) {
+            // High-entropy random booking code (e.g. BK19JTST0W) provided directly
+            // Query continues by booking_code
+        } else {
+            return response()->json([
+                'message' => 'Sign in to cancel a booking, or supply the email used to make it.',
+            ], 401);
         }
 
         $booking = $query->first();
