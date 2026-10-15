@@ -42,19 +42,26 @@ class AdminProvision extends Command
         }
 
         $existing = User::where('email', $email)->first();
+        $adminExists = User::where('email', $email)->where('role', 'admin')->exists();
 
         if ($this->option('revoke')) {
             return $this->revoke($existing, $email);
         }
 
-        if ($existing && ! $this->option('promote')) {
-            $this->error("An account already exists for {$email}.");
-            $this->line('  To make it an admin instead: php artisan admin:create --email=' . $email . ' --promote');
+        if ($adminExists && ! $this->option('promote')) {
+            $this->error("{$email} is already an admin.");
+            $this->line('  To remove admin access: php artisan admin:create --email=' . $email . ' --revoke');
 
             return self::FAILURE;
         }
 
-        if ($existing) {
+        // Same email may own guest/host rows (separate people): that never
+        // blocks a NEW admin login — it gets its own row and password.
+        if ($existing && ! $this->option('promote') && ! $adminExists) {
+            $this->line("Note: {$email} already has a non-admin account; creating a separate admin login with the same email.");
+        }
+
+        if ($existing && $this->option('promote')) {
             return $this->promote($existing);
         }
 
