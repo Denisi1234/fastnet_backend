@@ -205,6 +205,20 @@ class PayoutController extends Controller
         }
         $payout->save();
 
+        // Real push: the owner's bell lights up. Never breaks the update.
+        try {
+            $owner = $payout->owner;
+            if ($owner) {
+                $owner->notify(new \App\Notifications\PayoutStatusChanged(
+                    (string)$payout->payout_reference,
+                    (string)$newStatus,
+                    (float)$payout->amount,
+                ));
+            }
+        } catch (\Throwable $e) {
+            \Illuminate\Support\Facades\Log::warning('Payout notify failed: ' . $e->getMessage());
+        }
+
         return response()->json([
             'message' => "Payout {$payout->payout_reference} updated to {$newStatus}.",
             'payout'  => $payout->load(['owner', 'property', 'processor']),

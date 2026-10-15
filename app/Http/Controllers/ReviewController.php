@@ -116,6 +116,22 @@ class ReviewController extends Controller
             \Illuminate\Support\Facades\Cache::forget("property:detail:v2:{$request->property_id}");
             \Illuminate\Support\Facades\Cache::forget("property:{$request->property_id}");
 
+            // Real push: the host's bell lights up. Never breaks the review.
+            try {
+                $host = \App\Models\User::find($property->host_id);
+                if ($host && (int)$host->id !== (int)$userId) {
+                    $host->notify(new \App\Notifications\NewReview(
+                        $property->id,
+                        (string)($property->name ?? ''),
+                        (int)$review->rating,
+                        (string)($review->comment ?? ''),
+                        (string)$guestName,
+                    ));
+                }
+            } catch (\Throwable $e) {
+                \Illuminate\Support\Facades\Log::warning('Review notify failed: ' . $e->getMessage());
+            }
+
             return response()->json([
                 'id' => $review->id,
                 'user_name' => $review->guest_name,

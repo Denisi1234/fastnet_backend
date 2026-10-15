@@ -129,6 +129,23 @@ class MessageController extends Controller
         // correspondence, and could not be told apart from a real reply.
         // Real replies arrive via the host's own session.
 
+        // Real push: the recipient's bell lights up. Never breaks sending.
+        try {
+            $recipient = User::find($request->recipient_id);
+            if ($recipient && (int)$recipient->id !== (int)$userId) {
+                $sender = $request->user();
+                $recipient->notify(new \App\Notifications\NewMessage(
+                    (int)$userId,
+                    (string)($sender->name ?? ''),
+                    (string)$request->lodge_name,
+                    (string)$request->text,
+                    (string)($recipient->role ?? 'customer'),
+                ));
+            }
+        } catch (\Throwable $e) {
+            \Illuminate\Support\Facades\Log::warning('Message notify failed: ' . $e->getMessage());
+        }
+
         $out = $message->toArray();
         if (!empty($quoted)) {
             $out['reply_to'] = [

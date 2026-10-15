@@ -66,6 +66,19 @@ class VerificationController extends Controller
             'status' => 'submitted',
         ]);
 
+        // Real push: every admin's bell lights up. Never breaks submission.
+        try {
+            $admins = User::where('role', 'admin')->get();
+            foreach ($admins as $admin) {
+                $admin->notify(new \App\Notifications\VerificationSubmitted(
+                    (int)$user->id,
+                    (string)($request->full_name ?: $user->name),
+                ));
+            }
+        } catch (\Throwable $e) {
+            \Illuminate\Support\Facades\Log::warning('Verification submit notify failed: ' . $e->getMessage());
+        }
+
         return response()->json([
             'message' => 'Owner verification submitted successfully.',
             'verification' => $verification,
@@ -144,6 +157,16 @@ class VerificationController extends Controller
             'reviewer_id' => $request->user()->id,
             'reviewed_at' => now(),
         ]);
+
+        // Real push: the owner's bell lights up. Never breaks the decision.
+        try {
+            $owner->notify(new \App\Notifications\VerificationDecided(
+                (string)$request->status,
+                (string)($reason ?? ''),
+            ));
+        } catch (\Throwable $e) {
+            \Illuminate\Support\Facades\Log::warning('Verification decision notify failed: ' . $e->getMessage());
+        }
 
         return response()->json([
             'message' => "Owner verification updated to {$request->status}.",
