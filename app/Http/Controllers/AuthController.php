@@ -22,20 +22,27 @@ class AuthController extends Controller
         ]);
 
         $phone = $request->phone_number !== null ? trim((string) $request->phone_number) : '';
-        $emailTaken = User::where('email', $request->email)->exists();
+        // Guest and host are separate people: the same email address may own
+        // one guest account AND one host account. Uniqueness is per
+        // (email, role) — enforced by the users_email_role_unique index — so
+        // only a duplicate within the SAME role is rejected here.
+        $role = $request->role === 'owner' ? 'owner' : 'customer';
+        $emailTaken = User::where('email', $request->email)->where('role', $role)->exists();
 
-        // A phone number must resolve to exactly one account: sign-in accepts a
-        // phone number, and the OTP lookup in LoginOtpController does
-        // where(phone_number)->first(). Two accounts sharing a number would make
-        // either lookup return an arbitrary account, so a duplicate number is
-        // rejected rather than stored.
-        $phoneTaken = $phone !== '' && User::where('phone_number', $phone)->exists();
+        // Same scoping for phone numbers: the host's M-Pesa payout number is
+        // often the same number as their guest account, and that is allowed.
+        // Password login disambiguates via the optional `role` parameter.
+        $phoneTaken = $phone !== '' && User::where('phone_number', $phone)->where('role', $role)->exists();
 
         if ($emailTaken) {
             return response()->json([
-                'message' => 'An account already exists with this email address. Sign in instead, or register with a different email.',
+                'message' => $role === 'owner'
+                    ? 'A host account already exists with this email address. Sign in to your host account instead.'
+                    : 'An account already exists with this email address. Sign in instead, or register with a different email.',
                 'errors' => [
-                    'email' => ['An account already exists with this email address. Sign in instead, or register with a different email.']
+                    'email' => [$role === 'owner'
+                        ? 'A host account already exists with this email address. Sign in to your host account instead.'
+                        : 'An account already exists with this email address. Sign in instead, or register with a different email.']
                 ]
             ], 422);
         }
@@ -59,7 +66,7 @@ class AuthController extends Controller
             // 'admin' is NOT accepted from the request body. It used to be, which
             // meant anyone could self-register as an administrator. Promotion to
             // admin happens server-side via /admin endpoints only.
-            'role' => $request->role === 'owner' ? 'owner' : 'customer',
+            'role' => $role,
         ]);
 
         try {
@@ -90,15 +97,34 @@ class AuthController extends Controller
         $request->validate([
             'email' => 'required|string',
             'password' => 'required|string',
+            // Optional disambiguator: the same email/phone may own a guest
+            // account AND a host account (separate people/rows). The host
+            // sign-in sends role=owner so the host row is picked.
+            'role' => 'nullable|string|in:customer,owner',
         ]);
         Log::info("AUTH DEBUG 3 — VALIDATION COMPLETE");
 
         $login = trim($request->email);
         Log::info("AUTH DEBUG 4 — USER DATABASE LOOKUP START", ['login' => $login]);
-        $user = User::where('email', $login)
-                    ->orWhere('phone_number', $login)
-                    ->orWhere('phone_number', preg_replace('/[^0-9+]/', '', $login))
-                    ->first();
+        $cleanLogin = preg_replace('/[^0-9+]/', '', $login);
+        if (!empty($request->role)) {
+            // Strict: a role-scoped sign-in only ever matches that role, so a
+            // guest password can never mint a host session and vice versa.
+            $user = User::where('role', $request->role)
+                ->where(function ($q) use ($login, $cleanLogin) {
+                    $q->where('email', $login)
+                        ->orWhere('phone_number', $login);
+                    if ($cleanLogin !== '' && $cleanLogin !== $login) {
+                        $q->orWhere('phone_number', $cleanLogin);
+                    }
+                })
+                ->first();
+        } else {
+            $user = User::where('email', $login)
+                        ->orWhere('phone_number', $login)
+                        ->orWhere('phone_number', $cleanLogin)
+                        ->first();
+        }
         Log::info("AUTH DEBUG 5 — USER DATABASE LOOKUP COMPLETE", ['found' => (bool)$user]);
 
         Log::info("AUTH DEBUG 6 — PASSWORD VERIFICATION START");
@@ -231,7 +257,9 @@ class AuthController extends Controller
         
         $validated = $request->validate([
             'name' => 'required|string|max:255',
-            'email' => 'required|string|email|max:255|unique:users,email,' . $user->id,
+            // Email uniqueness is per (email, role): a guest and a host may
+            // share the same address as two separate accounts.
+            'email' => 'required|string|email|max:255|unique:users,email,' . $user->id . ',id,role,' . $user->role,
             'phone_number' => 'nullable|string',
             'date_of_birth' => 'nullable|string',
             'gender' => 'nullable|string',
