@@ -7,6 +7,7 @@ use App\Models\User;
 use App\Notifications\BookingCancelled;
 use App\Notifications\BookingCompleted;
 use App\Notifications\BookingConfirmed;
+use App\Notifications\BookingRescheduled;
 use App\Notifications\PaymentReceipt;
 use Illuminate\Support\Facades\Log;
 
