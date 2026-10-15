@@ -120,10 +120,25 @@ class AuthController extends Controller
                 })
                 ->first();
         } else {
-            $user = User::where('email', $login)
+            // No role given (normal sign-in, old clients): the same contact
+            // may own several rows, so every match is collected and the
+            // password decides below — whichever row's hash matches wins.
+            // A single-account login behaves exactly as before.
+            $candidates = User::where('email', $login)
                         ->orWhere('phone_number', $login)
                         ->orWhere('phone_number', $cleanLogin)
-                        ->first();
+                        ->get();
+            $user = null;
+            foreach ($candidates as $candidate) {
+                if (Hash::check($request->password, $candidate->password)) {
+                    $user = $candidate;
+                    break;
+                }
+            }
+            if ($user === null) {
+                // Preserve the old failure shape: single wrong row or no row.
+                $user = $candidates->first();
+            }
         }
         Log::info("AUTH DEBUG 5 — USER DATABASE LOOKUP COMPLETE", ['found' => (bool)$user]);
 
