@@ -14,8 +14,14 @@ class Message extends Model
         'recipient_id',
         'lodge_name',
         'text',
+        'reply_to_id',
         'unread',
     ];
+
+    public function replyTo()
+    {
+        return $this->belongsTo(Message::class, 'reply_to_id');
+    }
 
     public function sender()
     {

@@ -58,13 +58,30 @@ class MessageController extends Controller
         })->orWhere(function($q) use ($userId, $partnerId) {
             $q->where('sender_id', $partnerId)->where('recipient_id', $userId);
         })->orderBy('created_at', 'asc')->get();
+
+        $quoted = [];
+        $quoteIds = $messages->pluck('reply_to_id')->filter()->unique()->values()->all();
+        if (!empty($quoteIds)) {
+            $quoted = Message::whereIn('id', $quoteIds)->with('sender:id,name')->get()->keyBy('id');
+        }
         
         Message::where('sender_id', $partnerId)
             ->where('recipient_id', $userId)
             ->where('unread', true)
             ->update(['unread' => false]);
-            
-        return response()->json($messages);
+
+        return response()->json($messages->map(function ($m) use ($quoted) {
+            $row = $m->toArray();
+            if ($m->reply_to_id && isset($quoted[$m->reply_to_id])) {
+                $q = $quoted[$m->reply_to_id];
+                $row['reply_to'] = [
+                    'id' => $q->id,
+                    'text' => $q->text,
+                    'sender_name' => $q->sender->name ?? 'Guest',
+                ];
+            }
+            return $row;
+        })->values()->all());
     }
     
     public function store(Request $request)
@@ -72,16 +89,37 @@ class MessageController extends Controller
         $request->validate([
             'recipient_id' => 'required|exists:users,id',
             'lodge_name' => 'required|string',
-            'text' => 'required|string',
+            'text' => 'required|string|max:2000',
+            'reply_to_id' => 'nullable|integer|exists:messages,id',
         ]);
         
         $userId = $request->user()->id;
+
+        if ((int)$request->recipient_id === (int)$userId) {
+            return response()->json(['message' => 'You cannot message yourself.'], 422);
+        }
+
+        // A quote must point at a message inside this same conversation —
+        // never at a stranger's row.
+        $replyToId = $request->reply_to_id ? (int)$request->reply_to_id : null;
+        $quoted = null;
+        if ($replyToId) {
+            $quoted = Message::find($replyToId);
+            $inThread = $quoted && (
+                ($quoted->sender_id == $userId && $quoted->recipient_id == $request->recipient_id) ||
+                ($quoted->sender_id == $request->recipient_id && $quoted->recipient_id == $userId)
+            );
+            if (!$inThread) {
+                return response()->json(['message' => 'Quoted message not found in this conversation.'], 422);
+            }
+        }
         
         $message = Message::create([
             'sender_id' => $userId,
             'recipient_id' => $request->recipient_id,
             'lodge_name' => $request->lodge_name,
             'text' => $request->text,
+            'reply_to_id' => $replyToId,
             'unread' => true,
         ]);
         
@@ -91,6 +129,15 @@ class MessageController extends Controller
         // correspondence, and could not be told apart from a real reply.
         // Real replies arrive via the host's own session.
 
-        return response()->json($message, 201);
+        $out = $message->toArray();
+        if (!empty($quoted)) {
+            $out['reply_to'] = [
+                'id' => $quoted->id,
+                'text' => $quoted->text,
+                'sender_name' => $quoted->sender->name ?? 'Guest',
+            ];
+        }
+
+        return response()->json($out, 201);
     }
 }
