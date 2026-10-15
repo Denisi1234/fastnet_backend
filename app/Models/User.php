@@ -31,4 +31,13 @@ class User extends Authenticatable
             'password' => 'hashed',
         ];
     }
+
+    /**
+     * Owner KYC dossier for this user (hosts). Used by the admin
+     * verification summary — its absence 500'd that endpoint.
+     */
+    public function ownerVerification()
+    {
+        return $this->hasOne(OwnerVerification::class, 'user_id');
+    }
 }
