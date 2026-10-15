@@ -497,14 +497,15 @@ class PropertyController extends Controller
         }
 
         $request->validate([
-            'file' => 'required|image|max:10240', // 10MB max
+            // Photos plus PDF scans (ID and business licences are often PDFs).
+            'file' => 'required|file|mimes:jpg,jpeg,png,webp,gif,bmp,pdf|max:10240', // 10MB max
         ]);
 
         if ($request->hasFile('file')) {
             try {
                 $file = $request->file('file');
                 $disk = 'public';
-                $allowedExtensions = ['jpg', 'jpeg', 'png', 'webp', 'gif', 'bmp'];
+                $allowedExtensions = ['jpg', 'jpeg', 'png', 'webp', 'gif', 'bmp', 'pdf'];
                 $originalExtension = strtolower((string) $file->getClientOriginalExtension());
                 if (!in_array($originalExtension, $allowedExtensions, true)) {
                     $originalExtension = 'jpg';
